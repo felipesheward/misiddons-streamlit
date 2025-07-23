@@ -1,5 +1,4 @@
-Flask>=3.0
-pandas>=2.0
+streamlit
+pandas
 Pillow
 requests
-pyzbar; platform_system!="Windows"  # optional, requires libzbar
