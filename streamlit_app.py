@@ -404,9 +404,11 @@ if not top_rated.empty:
 else:
     st.info("You haven’t rated any books yet!")
 
-# --- Recommendations ---
+# --- Recommended Books from Your Favorite Authors ---
 st.subheader("Recommended Books from Your Favorite Authors")
+
 if not library_df.empty:
+    # Build a clean list of single author names
     author_list = (library_df["Author"]
                    .str.split(",")
                    .explode()
@@ -414,18 +416,29 @@ if not library_df.empty:
                    .dropna()
                    .unique()
                    .tolist())
-    fav_author = st.selectbox("Select an author:", sorted(author_list))
+
+    fav_author = st.selectbox("Select an author:", sorted(author_list), key="rec_author")
+
+    # Button to force rerun and avoid cached empties
+    if st.button("Get recommendations", key="get_recs_btn"):
+        st.cache_data.clear()  # clear stale cached empty results
+
     if fav_author:
-        recs = get_recommendations_by_author(fav_author)
+        with st.spinner(f"Fetching books by {fav_author}..."):
+            recs = get_recommendations_by_author(fav_author)
+
+        st.write(f"**Found {len(recs)} recommendations.**")  # <-- visible debug line
+
         if not recs:
-            st.info("No recommendations found. Try another author.")
-        for rec in recs:
-            with st.container():
-                col1, col2 = st.columns([1,3])
-                if rec.get("Thumbnail","").startswith("http"):
-                    col1.image(rec["Thumbnail"], width=120)
-                with col2:
-                    st.markdown(f"**{rec['Title']}** by {rec['Authors']}")
-                    st.write(f"Year: {rec['Year']}, Rating: {rec['Rating']}")
-                    st.write(rec["Description"])
+            st.warning("No recommendations came back (API returned nothing). Try another author or tap 'Get recommendations' again.")
+        else:
+            for rec in recs:
+                with st.container():
+                    c1, c2 = st.columns([1, 3])
+                    if rec.get("Thumbnail", "").startswith("http"):
+                        c1.image(rec["Thumbnail"], width=120)
+                    with c2:
+                        st.markdown(f"**{rec['Title']}**")
+                        st.write(f"_by {rec['Authors']}_  \nYear: {rec['Year']}  |  Rating: {rec['Rating']}")
+                        st.write(rec["Description"])
                 st.markdown("---")
