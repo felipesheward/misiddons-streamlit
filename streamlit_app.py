@@ -392,21 +392,21 @@ if total:
         st.write(f"- {lang}: {cnt}")
 
 
-# --- Top Rated (TOP 10 LIST) ---
+# --- Top Rated (Top 10: only Title, Author, Rating) ---
 st.subheader("Top Rated Books (Top 10)")
+
+cols = ["Title", "Author", "Rating"]
 top_rated = (
-    library_df[library_df["Rating"].notna()]
-    .sort_values(["Rating", "Title"], ascending=[False, True])
-    .head(10)
+    library_df.dropna(subset=["Rating"])
+              .sort_values(["Rating", "Title"], ascending=[False, True])
+              .head(10)[cols]
 )
 
-if not top_rated.empty:
-    for i, (_, book) in enumerate(top_rated.iterrows(), 1):
-        stars = "★" * int(book["Rating"]) + "☆" * (5 - int(book["Rating"]))
-        st.markdown(f"**{i}. {book['Title']}** — _{book['Author']}_  \n{stars}")
-        st.markdown("---")
-else:
+if top_rated.empty:
     st.info("You haven’t rated any books yet!")
+else:
+    for i, row in enumerate(top_rated.itertuples(index=False), 1):
+        st.markdown(f"**{i}. {row.Title}** — {row.Author} | {row.Rating}/5")
 
 # --- Top 5 Authors WITH titles ---
 st.subheader("Top 5 Authors (with your titles)")
