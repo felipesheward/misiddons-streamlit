@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Misiddons Book Database – Streamlit version
+Misiddons Book Database – Streamlit app
 """
 
 import os
@@ -10,43 +10,50 @@ import requests
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
+from pathlib import Path
 
 # ---------- Optional barcode support ----------
 try:
     from pyzbar.pyzbar import decode as zbar_decode
-except Exception:   # pyzbar or libzbar not installed
+except Exception:   # pyzbar or libzbar missing
     zbar_decode = None
 
-# ---------- Streamlit page config ----------
+# ---------- Streamlit config ----------
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
+st.markdown(
+    """
+    <style>
+    [data-testid=column]:not(:last-child){margin-right:1rem;}
+    .stButton > button{width:100%;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-st.markdown("""
-<style>
-[data-testid=column]:not(:last-child){margin-right:1rem;}
-.stButton > button{width:100%;}
-</style>
-""", unsafe_allow_html=True)
+# ---------- Paths ----------
+BASE = Path(__file__).parent
+DATA_DIR = BASE / "data"
+DATA_DIR.mkdir(exist_ok=True)
 
-# ---------- Paths & data ----------
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
-BOOK_DB = os.path.join(DATA_DIR, "books_database.csv")
-WISHLIST_DB = os.path.join(DATA_DIR, "wishlist_database.csv")
+BOOK_DB = DATA_DIR / "books_database.csv"
+WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
-# ---------- Helpers ----------
-def load_db(path: str) -> pd.DataFrame:
+# ---------- Data helpers ----------
+def load_db(path: Path) -> pd.DataFrame:
     try:
         df = pd.read_csv(path, dtype={"ISBN": str})
     except FileNotFoundError:
-        df = pd.DataFrame(columns=["ISBN","Title","Author","Genre",
-                                   "Language","Thumbnail","Description","Rating"])
+        df = pd.DataFrame(columns=[
+            "ISBN","Title","Author","Genre","Language",
+            "Thumbnail","Description","Rating"
+        ])
     if "Rating" not in df.columns:
         df["Rating"] = pd.NA
     else:
         df["Rating"] = pd.to_numeric(df["Rating"], errors="coerce")
     return df
 
-def save_db(df: pd.DataFrame, path: str) -> pd.DataFrame:
+def save_db(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     df = df.copy()
     df["ISBN"] = df["ISBN"].astype(str)
     if "Rating" not in df.columns:
@@ -54,8 +61,8 @@ def save_db(df: pd.DataFrame, path: str) -> pd.DataFrame:
     df.to_csv(path, index=False)
     return df
 
+# ---------- Barcode ----------
 def scan_barcode(image: Image.Image) -> str | None:
-    """Return first decoded barcode (ISBN) or None."""
     if zbar_decode is None:
         return None
     img = ImageOps.exif_transpose(image).convert("RGB")
@@ -65,13 +72,14 @@ def scan_barcode(image: Image.Image) -> str | None:
         res = zbar_decode(big)
     return res[0].data.decode("utf-8") if res else None
 
-def _clip(text: str, n: int = 300) -> str:
-    return (text or "No description available.")[:n] + ("..." if len(text or "") > n else "")
+# ---------- Book API helpers ----------
+def _clip(text: str | None, n: int = 300) -> str:
+    text = text or "No description available."
+    return text[:n] + ("..." if len(text) > n else "")
 
 def _norm_lang(code: str | None) -> str:
     return (code or "").upper() or "Unknown"
 
-# ---------- Book detail fetchers ----------
 def fetch_from_google(isbn: str) -> dict | None:
     url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
     r = requests.get(url, timeout=12, headers={"User-Agent": "misiddons/1.0"})
@@ -122,14 +130,12 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
 
 def fetch_book_details(isbn: str) -> dict | None:
     isbn = isbn.replace("-", "").strip()
-    # Try Google Books first
     try:
         details = fetch_from_google(isbn)
         if details:
             return details
     except Exception:
         pass
-    # Fallback to OpenLibrary
     try:
         return fetch_from_openlibrary(isbn)
     except Exception:
@@ -248,7 +254,6 @@ if book_file:
                 details = fetch_book_details(manual_isbn)
             if details:
                 st.success(f"Got details for {manual_isbn}")
-                # let the user add as above
                 col1, col2 = st.columns([1, 3])
                 if details.get("Thumbnail","").startswith("http"):
                     col1.image(details["Thumbnail"], width=120)
@@ -297,7 +302,9 @@ if not unrated.empty:
         book = unrated.sample(1, random_state=random.randint(0, 10000)).iloc[0]
         st.session_state["rate_current_isbn"] = book["ISBN"]
     else:
-        book = library_df.loc[library_df["ISBN"] == st.session_state["rate_current_isbn"]].iloc[0]
+        book = library_df.loc[
+            library_df["ISBN"] == st.session_state["rate_current_isbn"]
+        ].iloc[0]
 
     idx0 = library_df.index[library_df["ISBN"] == book["ISBN"]][0]
     st.markdown(f"**Title:** {book['Title']}  \n**Author:** {book['Author']}")
@@ -309,7 +316,10 @@ if not unrated.empty:
 
     rating_key = f"rate_{book['ISBN']}"
     if rating_key not in st.session_state:
-        st.session_state[rating_key] = int(library_df.at[idx0,"Rating"]) if pd.notna(library_df.at[idx0,"Rating"]) else 3
+        st.session_state[rating_key] = (
+            int(library_df.at[idx0,"Rating"])
+            if pd.notna(library_df.at[idx0,"Rating"]) else 3
+        )
 
     rating = st.radio(
         label="",
