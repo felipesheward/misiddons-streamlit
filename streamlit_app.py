@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 from PIL import Image, ImageOps
+from urllib.parse import quote
 
 # ---------- OPTIONAL barcode support ----------
 try:
@@ -148,8 +149,6 @@ def fetch_book_details(isbn: str) -> dict | None:
     except Exception:
         return None
 
-from urllib.parse import quote
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dict]:
     """Return recs using Google Books, then OpenLibrary with better description fallback."""
@@ -179,7 +178,6 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
     except Exception:
         pass
 
-    # enough?
     if len(out) >= max_results:
         return out[:max_results]
 
@@ -393,30 +391,59 @@ if total:
     for lang, cnt in library_df["Language"].value_counts().items():
         st.write(f"- {lang}: {cnt}")
 
-    st.write("#### Top 5 Authors")
-    auth = (library_df["Author"]
-            .str.split(",")
-            .explode()
-            .str.strip()
-            .value_counts()
-            .head(5))
-    st.bar_chart(auth)
+    st.write("#### Top 5 Authors (bar chart)")
+    auth_counts = (
+        library_df["Author"]
+        .str.split(",")
+        .explode()
+        .str.strip()
+        .value_counts()
+        .head(5)
+    )
+    st.bar_chart(auth_counts)
 
-# --- Top Rated ---
-st.subheader("Top Rated Books")
-top_rated = (library_df[library_df["Rating"].notna()]
-             .sort_values(["Rating", "Title"], ascending=[False, True])
-             .head(10))
+# --- Top Rated (TOP 10 LIST) ---
+st.subheader("Top Rated Books (Top 10)")
+top_rated = (
+    library_df[library_df["Rating"].notna()]
+    .sort_values(["Rating", "Title"], ascending=[False, True])
+    .head(10)
+)
 
 if not top_rated.empty:
     for i, (_, book) in enumerate(top_rated.iterrows(), 1):
         stars = "★" * int(book["Rating"]) + "☆" * (5 - int(book["Rating"]))
-        st.markdown(
-            f"**{i}. {book['Title']}** — _{book['Author']}_  \n{stars}"
-        )
+        st.markdown(f"**{i}. {book['Title']}** — _{book['Author']}_  \n{stars}")
         st.markdown("---")
 else:
     st.info("You haven’t rated any books yet!")
+
+# --- Top 5 Authors WITH titles ---
+st.subheader("Top 5 Authors (with your titles)")
+if not library_df.empty:
+    auth_df = (
+        library_df.assign(Author=library_df["Author"].str.split(","))
+                  .explode("Author")
+                  .assign(Author=lambda d: d["Author"].str.strip())
+    )
+
+    top_authors = (
+        auth_df.groupby("Author")
+               .agg(
+                   BookCount=("Title", "size"),
+                   Titles=("Title", lambda s: sorted(set(s)))
+               )
+               .sort_values("BookCount", ascending=False)
+               .head(5)
+    )
+
+    for i, (author, row) in enumerate(top_authors.iterrows(), start=1):
+        st.markdown(f"**{i}. {author}** — {row.BookCount} book(s)")
+        for title in row.Titles:
+            st.write(f"- {title}")
+        st.markdown("---")
+else:
+    st.info("Library is empty.")
 
 # --- Recommendations ---
 st.subheader("Recommended Books from Your Favorite Authors")
