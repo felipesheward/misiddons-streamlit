@@ -405,20 +405,15 @@ if total:
 # --- Top Rated ---
 st.subheader("Top Rated Books")
 top_rated = (library_df[library_df["Rating"].notna()]
-             .sort_values("Rating", ascending=False)
-             .head(5))
+             .sort_values(["Rating", "Title"], ascending=[False, True])
+             .head(10))
+
 if not top_rated.empty:
-    for _, book in top_rated.iterrows():
-        c1, c2, c3 = st.columns([1,3,1], gap="small")
-        if isinstance(book.get("Thumbnail",""), str) and book["Thumbnail"].startswith("http"):
-            c1.image(book["Thumbnail"], width=100)
-        else:
-            c1.write("*(No cover)*")
-        with c2:
-            st.markdown(f"**{book['Title']}**")
-            st.write(f"_by {book['Author']}_")
-        stars = "★"*int(book["Rating"]) + "☆"*(5-int(book["Rating"]))
-        c3.markdown(f"**{stars}**")
+    for i, (_, book) in enumerate(top_rated.iterrows(), 1):
+        stars = "★" * int(book["Rating"]) + "☆" * (5 - int(book["Rating"]))
+        st.markdown(
+            f"**{i}. {book['Title']}** — _{book['Author']}_  \n{stars}"
+        )
         st.markdown("---")
 else:
     st.info("You haven’t rated any books yet!")
