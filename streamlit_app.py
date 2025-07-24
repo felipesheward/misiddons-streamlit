@@ -391,16 +391,6 @@ if total:
     for lang, cnt in library_df["Language"].value_counts().items():
         st.write(f"- {lang}: {cnt}")
 
-    st.write("#### Top 5 Authors (bar chart)")
-    auth_counts = (
-        library_df["Author"]
-        .str.split(",")
-        .explode()
-        .str.strip()
-        .value_counts()
-        .head(5)
-    )
-    st.bar_chart(auth_counts)
 
 # --- Top Rated (TOP 10 LIST) ---
 st.subheader("Top Rated Books (Top 10)")
