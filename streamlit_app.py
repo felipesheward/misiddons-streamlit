@@ -5,39 +5,29 @@ Misiddons Book Database – Streamlit app
 """
 
 import random
-from pathlib import Path
-
-import pandas as pd
 import requests
+import pandas as pd
 import streamlit as st
+from pathlib import Path
 from PIL import Image, ImageOps
 
 # ---------- OPTIONAL barcode support ----------
 try:
     from pyzbar.pyzbar import decode as zbar_decode
-except Exception:
-    zbar_decode = None  # pyzbar/libzbar not available
+except Exception:   # pyzbar/libzbar missing in environment
+    zbar_decode = None
 
 # ---------- Streamlit config ----------
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
-
-# Base CSS (columns/buttons) + card styling for Top Rated section
-st.markdown("""
-<style>
-[data-testid=column]:not(:last-child){margin-right:1rem;}
-.stButton > button{width:100%;}
-.card{
-  border:1px solid #e5e5e5;border-radius:12px;padding:16px;
-  box-shadow:0 2px 8px rgb(0 0 0 / 6%);margin-bottom:18px;background:white;
-}
-.card h4{margin:0 0 6px 0;font-size:1.05rem;}
-.badge{
-  display:inline-block;padding:2px 8px;font-size:.75rem;
-  background:#f0f2f6;border-radius:6px;margin-right:6px;
-}
-.stars{color:#ffb400;font-size:1.1rem;}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <style>
+    [data-testid=column]:not(:last-child){margin-right:1rem;}
+    .stButton > button{width:100%;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ---------- Paths ----------
 BASE = Path(__file__).parent
@@ -47,14 +37,14 @@ DATA_DIR.mkdir(exist_ok=True)
 BOOK_DB = DATA_DIR / "books_database.csv"
 WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
-# ---------- Helpers ----------
+# ---------- Data helpers ----------
 def load_db(path: Path) -> pd.DataFrame:
     try:
         df = pd.read_csv(path, dtype={"ISBN": str})
     except FileNotFoundError:
         df = pd.DataFrame(columns=[
-            "ISBN", "Title", "Author", "Genre", "Language",
-            "Thumbnail", "Description", "Rating"
+            "ISBN","Title","Author","Genre","Language",
+            "Thumbnail","Description","Rating"
         ])
     if "Rating" not in df.columns:
         df["Rating"] = pd.NA
@@ -70,29 +60,27 @@ def save_db(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     df.to_csv(path, index=False)
     return df
 
-def scan_barcode(image: Image.Image):
-    """Decode first barcode or return None."""
+# ---------- Barcode ----------
+def scan_barcode(image: Image.Image) -> str | None:
+    """Decode a barcode (if pyzbar is available)."""
     if zbar_decode is None:
         return None
     img = ImageOps.exif_transpose(image).convert("RGB")
-    codes = zbar_decode(img)
-    if not codes:
-        img = img.resize((img.width * 2, img.height * 2))
-        codes = zbar_decode(img)
-    return codes[0].data.decode("utf-8") if codes else None
+    res = zbar_decode(img)
+    if not res:
+        big = img.resize((img.width * 2, img.height * 2))
+        res = zbar_decode(big)
+    return res[0].data.decode("utf-8") if res else None
 
+# ---------- Book API utilities ----------
 def _clip(text: str | None, n: int = 300) -> str:
-    """Return shortened text; empty string if nothing."""
-    if not text:
-        return ""
-    text = text.strip()
-    return text[:n] + ("..." if len(text) > n else "")
+    text = (text or "").strip()
+    return text[:n] + ("..." if len(text) > n else "") if text else "No description available."
 
 def _norm_lang(code: str | None) -> str:
     return (code or "").upper() or "Unknown"
 
-# -------- Book detail fetchers --------
-def fetch_from_google(isbn: str):
+def fetch_from_google(isbn: str) -> dict | None:
     url = "https://www.googleapis.com/books/v1/volumes"
     r = requests.get(url, params={"q": f"isbn:{isbn}"}, timeout=12,
                      headers={"User-Agent": "misiddons/1.0"})
@@ -100,11 +88,8 @@ def fetch_from_google(isbn: str):
     items = r.json().get("items", [])
     if not items:
         return None
-    item = items[0]
-    info = item.get("volumeInfo", {})
-    desc = (info.get("description")
-            or item.get("searchInfo", {}).get("textSnippet")
-            or info.get("subtitle"))
+    info = items[0].get("volumeInfo", {})
+    desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
     return {
         "Title": info.get("title", "Unknown Title"),
         "Author": ", ".join(info.get("authors", ["Unknown Author"])),
@@ -115,11 +100,12 @@ def fetch_from_google(isbn: str):
         "Rating": pd.NA,
     }
 
-def fetch_from_openlibrary(isbn: str):
+def fetch_from_openlibrary(isbn: str) -> dict | None:
     r = requests.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=12)
     if r.status_code != 200:
         return None
     j = r.json()
+    title = j.get("title", "Unknown Title")
 
     # authors
     authors = []
@@ -140,7 +126,7 @@ def fetch_from_openlibrary(isbn: str):
         lang = j["languages"][0].get("key", "").split("/")[-1].upper() or "Unknown"
 
     return {
-        "Title": j.get("title", "Unknown Title"),
+        "Title": title,
         "Author": ", ".join(authors) if authors else "Unknown Author",
         "Genre": "Unknown",
         "Language": lang,
@@ -149,7 +135,7 @@ def fetch_from_openlibrary(isbn: str):
         "Rating": pd.NA,
     }
 
-def fetch_book_details(isbn: str):
+def fetch_book_details(isbn: str) -> dict | None:
     isbn = isbn.replace("-", "").strip()
     try:
         d = fetch_from_google(isbn)
@@ -162,21 +148,18 @@ def fetch_book_details(isbn: str):
     except Exception:
         return None
 
-# -------- Recommendations --------
 from urllib.parse import quote
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dict]:
-    """Google Books first; fall back to OpenLibrary. Try multiple fields for description."""
+    """Return recs using Google Books, then OpenLibrary with better description fallback."""
     def clip(t, n=300):
-        if not t:
-            return ""
-        t = t.strip()
-        return t[:n] + ("..." if len(t) > n else "")
+        t = (t or "").strip()
+        return t[:n] + ("..." if len(t) > n else "") if t else "No description available."
 
-    recs: list[dict] = []
+    out = []
 
-    # Google Books
+    # ---- Google Books ----
     try:
         url = "https://www.googleapis.com/books/v1/volumes"
         params = {"q": f'inauthor:"{author}"', "maxResults": max_results}
@@ -184,10 +167,8 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
         r.raise_for_status()
         for item in r.json().get("items", []):
             info = item.get("volumeInfo", {})
-            desc = (info.get("description")
-                    or item.get("searchInfo", {}).get("textSnippet")
-                    or info.get("subtitle"))
-            recs.append({
+            desc = info.get("description") or item.get("searchInfo", {}).get("textSnippet")
+            out.append({
                 "Title": info.get("title", "Unknown Title"),
                 "Authors": ", ".join(info.get("authors", ["Unknown Author"])),
                 "Year": info.get("publishedDate", "").split("-")[0] or "Unknown",
@@ -198,10 +179,11 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
     except Exception:
         pass
 
-    if len(recs) >= max_results:
-        return recs[:max_results]
+    # enough?
+    if len(out) >= max_results:
+        return out[:max_results]
 
-    # OpenLibrary fallback
+    # ---- OpenLibrary fallback ----
     try:
         url = f"https://openlibrary.org/search.json?author={quote(author)}&limit={max_results}"
         r = requests.get(url, timeout=8)
@@ -210,7 +192,7 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
                 cover_id = d.get("cover_i")
                 thumb = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ""
                 desc = d.get("first_sentence") or d.get("subtitle") or ""
-                recs.append({
+                out.append({
                     "Title": d.get("title", "Unknown Title"),
                     "Authors": ", ".join(d.get("author_name", ["Unknown Author"])),
                     "Year": str(d.get("first_publish_year", "Unknown")),
@@ -221,7 +203,7 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
     except Exception:
         pass
 
-    return recs[:max_results]
+    return out[:max_results]
 
 # ---------- Session state ----------
 if "library" not in st.session_state:
@@ -235,16 +217,10 @@ wishlist_df = st.session_state["wishlist"].copy()
 # ---------- UI ----------
 st.title("Misiddons Book Database")
 
-# (Optional) manual cache clear
-with st.expander("Maintenance"):
-    if st.button("Clear cached API calls"):
-        st.cache_data.clear()
-        st.success("Cache cleared – rerun the author query.")
-
 # --- Scan section ---
 st.subheader("Scan Barcode to Add to Library or Wishlist")
 book_file = st.file_uploader("Upload a barcode image to add a book",
-                             type=["jpg", "jpeg", "png"], key="scan_book")
+                             type=["jpg","jpeg","png"], key="scan_book")
 
 if book_file:
     img = Image.open(book_file)
@@ -270,19 +246,23 @@ if book_file:
                 manual_title = st.text_input("Enter title manually:")
                 if manual_title:
                     details = {
-                        "Title": manual_title, "Author": "Unknown",
-                        "Genre": "Unknown", "Language": "Unknown",
-                        "Thumbnail": "", "Description": "", "Rating": pd.NA
+                        "Title": manual_title,
+                        "Author": "Unknown",
+                        "Genre": "Unknown",
+                        "Language": "Unknown",
+                        "Thumbnail": "",
+                        "Description": "",
+                        "Rating": pd.NA
                     }
 
             if details:
-                c1, c2 = st.columns([1, 3])
-                if details.get("Thumbnail", "").startswith("http"):
-                    c1.image(details["Thumbnail"], width=120)
-                with c2:
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
                     st.markdown(f"### {details['Title']}")
                     st.write(f"*{details['Author']}*")
-                    st.write(details["Description"] or "No description available.")
+                    st.write(details['Description'])
 
                 b1, b2 = st.columns(2)
                 with b1:
@@ -301,24 +281,24 @@ if book_file:
                         )
                         st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
                         st.success("Added to Wishlist!")
-
     else:
         if zbar_decode is None:
-            st.error("Barcode module unavailable. Enter ISBN manually below.")
+            st.error("Barcode scanning module unavailable. Type the ISBN below.")
         else:
-            st.error("No barcode detected. Enter ISBN manually below.")
+            st.error("No barcode detected. Try a clearer photo or enter ISBN manually.")
         manual_isbn = st.text_input("ISBN (manual):", "")
         if manual_isbn:
             with st.spinner("Fetching book details..."):
                 details = fetch_book_details(manual_isbn)
             if details:
-                c1, c2 = st.columns([1, 3])
-                if details.get("Thumbnail", "").startswith("http"):
-                    c1.image(details["Thumbnail"], width=120)
-                with c2:
+                st.success(f"Got details for {manual_isbn}")
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
                     st.markdown(f"### {details['Title']}")
                     st.write(f"*{details['Author']}*")
-                    st.write(details["Description"] or "No description available.")
+                    st.write(details['Description'])
                 b1, b2 = st.columns(2)
                 with b1:
                     if st.button("Add to Library", key=f"add_lib_manual_{manual_isbn}"):
@@ -351,32 +331,32 @@ if search_q:
 # --- Rate books ---
 st.subheader("Rate Your Books")
 unrated = library_df[library_df["Rating"].isna()]
-
 if not unrated.empty:
-    if ("rate_current_isbn" not in st.session_state or
-        st.session_state["rate_current_isbn"] not in unrated["ISBN"].tolist()):
+    if ("rate_current_isbn" not in st.session_state
+        or st.session_state["rate_current_isbn"] not in unrated["ISBN"].tolist()):
         book = unrated.sample(1, random_state=random.randint(0, 10000)).iloc[0]
         st.session_state["rate_current_isbn"] = book["ISBN"]
     else:
-        book = library_df.loc[library_df["ISBN"] == st.session_state["rate_current_isbn"]].iloc[0]
+        book = library_df.loc[
+            library_df["ISBN"] == st.session_state["rate_current_isbn"]
+        ].iloc[0]
 
     idx0 = library_df.index[library_df["ISBN"] == book["ISBN"]][0]
     st.markdown(f"**Title:** {book['Title']}  \n**Author:** {book['Author']}")
-    thumb = book.get("Thumbnail", "")
-    if isinstance(thumb, str) and thumb.startswith("http"):
-        st.image(thumb, width=150)
+    if isinstance(book.get("Thumbnail",""), str) and book["Thumbnail"].startswith("http"):
+        st.image(book["Thumbnail"], width=150)
 
     rating_key = f"rate_{book['ISBN']}"
     if rating_key not in st.session_state:
         st.session_state[rating_key] = (
-            int(library_df.at[idx0, "Rating"])
-            if pd.notna(library_df.at[idx0, "Rating"]) else 3
+            int(library_df.at[idx0,"Rating"])
+            if pd.notna(library_df.at[idx0,"Rating"]) else 3
         )
 
     rating = st.radio(
         label="",
-        options=[1, 2, 3, 4, 5],
-        format_func=lambda x: "★" * x + "☆" * (5 - x),
+        options=[1,2,3,4,5],
+        format_func=lambda x: "★"*x + "☆"*(5-x),
         key=rating_key,
         horizontal=True
     )
@@ -422,33 +402,26 @@ if total:
             .head(5))
     st.bar_chart(auth)
 
-# --- Top Rated Books (modern cards) ---
+# --- Top Rated ---
 st.subheader("Top Rated Books")
 top_rated = (library_df[library_df["Rating"].notna()]
              .sort_values("Rating", ascending=False)
              .head(5))
-
-if top_rated.empty:
-    st.info("You haven’t rated any books yet!")
-else:
+if not top_rated.empty:
     for _, book in top_rated.iterrows():
-        stars = "★" * int(book["Rating"]) + "☆" * (5 - int(book["Rating"]))
-        c1, c2 = st.columns([1, 5])
-        with c1:
-            thumb = book.get("Thumbnail", "")
-            if isinstance(thumb, str) and thumb.startswith("http"):
-                st.image(thumb, use_column_width=True)
-            else:
-                st.write("*(No cover)*")
+        c1, c2, c3 = st.columns([1,3,1], gap="small")
+        if isinstance(book.get("Thumbnail",""), str) and book["Thumbnail"].startswith("http"):
+            c1.image(book["Thumbnail"], width=100)
+        else:
+            c1.write("*(No cover)*")
         with c2:
-            st.markdown(f"""
-                <div class="card">
-                  <h4>{book['Title']}</h4>
-                  <div class="badge">by {book['Author']}</div>
-                  <div class="stars">{stars}</div>
-                  <p style="margin-top:8px;">{book.get('Description','') or 'No description available.'}</p>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"**{book['Title']}**")
+            st.write(f"_by {book['Author']}_")
+        stars = "★"*int(book["Rating"]) + "☆"*(5-int(book["Rating"]))
+        c3.markdown(f"**{stars}**")
+        st.markdown("---")
+else:
+    st.info("You haven’t rated any books yet!")
 
 # --- Recommendations ---
 st.subheader("Recommended Books from Your Favorite Authors")
@@ -464,6 +437,7 @@ if not library_df.empty:
 
     fav_author = st.selectbox("Select an author:", sorted(author_list), key="rec_author")
 
+    # manual refresh button to bust cache if needed
     if st.button("Get recommendations", key="get_recs_btn"):
         st.cache_data.clear()
 
@@ -474,12 +448,12 @@ if not library_df.empty:
         st.write(f"**Found {len(recs)} recommendations.**")
 
         if not recs:
-            st.warning("No recommendations came back. Try another author or tap the button again.")
+            st.warning("No recommendations came back. Try another author or tap 'Get recommendations' again.")
         else:
             for rec in recs:
                 with st.container():
-                    col1, col2 = st.columns([1, 3])
-                    if rec.get("Thumbnail", "").startswith("http"):
+                    col1, col2 = st.columns([1,3])
+                    if rec.get("Thumbnail","").startswith("http"):
                         col1.image(rec["Thumbnail"], width=120)
                     with col2:
                         st.markdown(f"**{rec['Title']}** by {rec['Authors']}")
