@@ -402,26 +402,37 @@ if total:
             .head(5))
     st.bar_chart(auth)
 
-# --- Top Rated ---
+# --- Top Rated Books (horizontal scroll) ---
 st.subheader("Top Rated Books")
+
 top_rated = (library_df[library_df["Rating"].notna()]
              .sort_values("Rating", ascending=False)
-             .head(5))
-if not top_rated.empty:
-    for _, book in top_rated.iterrows():
-        c1, c2, c3 = st.columns([1,3,1], gap="small")
-        if isinstance(book.get("Thumbnail",""), str) and book["Thumbnail"].startswith("http"):
-            c1.image(book["Thumbnail"], width=100)
-        else:
-            c1.write("*(No cover)*")
-        with c2:
-            st.markdown(f"**{book['Title']}**")
-            st.write(f"_by {book['Author']}_")
-        stars = "★"*int(book["Rating"]) + "☆"*(5-int(book["Rating"]))
-        c3.markdown(f"**{stars}**")
-        st.markdown("---")
-else:
+             .head(10))                     # show more, scroll handles width
+
+if top_rated.empty:
     st.info("You haven’t rated any books yet!")
+else:
+    cards_html = []
+    for _, book in top_rated.iterrows():
+        stars = "★" * int(book["Rating"]) + "☆" * (5 - int(book["Rating"]))
+        thumb = book.get("Thumbnail", "")
+        cover_tag = (f'<img src="{thumb}" class="cover-thumb">' 
+                     if isinstance(thumb, str) and thumb.startswith("http")
+                     else '<div class="cover-thumb" style="background:#eee;display:flex;align-items:center;justify-content:center;">No cover</div>')
+        desc = (book.get("Description","") or "No description available.")
+        card = f"""
+        <div class="card-mini">
+          {cover_tag}
+          <h5>{book['Title']}</h5>
+          <span class="badge">by {book['Author']}</span>
+          <span class="stars">{stars}</span>
+          <p style="font-size:.8rem;line-height:1.25em;max-height:4.5em;overflow:hidden;">{desc}</p>
+        </div>
+        """
+        cards_html.append(card)
+
+    st.markdown(f'<div class="hscroll">{"".join(cards_html)}</div>', unsafe_allow_html=True)
+    st.caption("Swipe/scroll horizontally to see more ⟶")
 
 # --- Recommendations ---
 st.subheader("Recommended Books from Your Favorite Authors")
