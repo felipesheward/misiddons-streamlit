@@ -121,15 +121,32 @@ def _norm_lang(code: str | None) -> str:
 
 # -- Google Books --
 
+# ---------- Book API helpers ----------
+
+def _clip(text: str | None, n: int = 300) -> str:
+    """Trim text to n characters, appending ellipsis. Use default if empty."""
+    s = (text or "").strip()
+    if not s:
+        return "No description available."
+    return s[:n] + ("..." if len(s) > n else "")
+
+def _norm_lang(code: str | None) -> str:
+    """Normalize a language code to uppercase, or return 'Unknown'."""
+    return (code or "").upper() or "Unknown"
+
+# -- Google Books --
 def fetch_from_google(isbn: str) -> dict | None:
-    url = "https://www.googleapis.com/books/v1/volumes"
-    r = requests.get(
-        url,
-        params={"q": f"isbn:{isbn}"},
-        timeout=12,
-        headers={"User-Agent": "misiddons/1.0"},
-    )
-    r.raise_for_status()
+    """Fetch book metadata from Google Books API."""
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f"isbn:{isbn}"},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        r.raise_for_status()
+    except Exception:
+        return None
     items = r.json().get("items", [])
     if not items:
         return None
@@ -145,22 +162,26 @@ def fetch_from_google(isbn: str) -> dict | None:
         "Rating": pd.NA,
     }
 
-
 # -- OpenLibrary fallback --
-
 def fetch_from_openlibrary(isbn: str) -> dict | None:
-    r = requests.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=12)
-    if r.status_code != 200:
+    """Fetch book metadata from OpenLibrary API."""
+    try:
+        r = requests.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=12)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+    except Exception:
         return None
-    j = r.json()
-    title = j.get("title", "Unknown Title")
 
-    # Authors
+    title = j.get("title", "Unknown Title")
     authors = []
     for a in j.get("authors", []):
-        ar = requests.get(f"https://openlibrary.org{a['key']}.json", timeout=6)
-        if ar.ok:
-            authors.append(ar.json().get("name", "Unknown Author"))
+        try:
+            ar = requests.get(f"https://openlibrary.org{a['key']}.json", timeout=6)
+            if ar.ok:
+                authors.append(ar.json().get("name", "Unknown Author"))
+        except Exception:
+            continue
 
     cover_id = j.get("covers", [None])[0]
     thumb = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ""
@@ -171,7 +192,8 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
 
     lang = "Unknown"
     if j.get("languages"):
-        lang = j["languages"][0].get("key", "").split("/")[-1].upper() or "Unknown"
+        key = j["languages"][0].get("key", "").split("/")[-1]
+        lang = key.upper() or "Unknown"
 
     return {
         "Title": title,
@@ -183,21 +205,38 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
         "Rating": pd.NA,
     }
 
-
 # -- unified fetch --
-
 def fetch_book_details(isbn: str) -> dict | None:
-    isbn = isbn.replace("-", "").strip()
-    try:
-        if details := fetch_from_google(isbn):
-            return details
-    except Exception:
-        pass
-    try:
-        return fetch_from_openlibrary(isbn)
-    except Exception:
-        return None
+    """
+    Unified fetch: try Google Books, fallback to OpenLibrary,
+    then apply thumbnail and description fallbacks.
+    """
+    key = isbn.replace("-", "").strip()
+    details = None
 
+    # 1) Try Google
+    try:
+        details = fetch_from_google(key)
+    except Exception:
+        details = None
+
+    # 2) Fallback to OpenLibrary
+    if not details:
+        try:
+            details = fetch_from_openlibrary(key)
+        except Exception:
+            details = None
+
+    # 3) Post‑process if we have data
+    if details:
+        # Thumbnail fallback via ISBN covers API
+        details["Thumbnail"] = details.get("Thumbnail", "") or \
+            f"https://covers.openlibrary.org/b/isbn/{key}-L.jpg"
+        # Description fallback
+        desc = details.get("Description", "") or ""
+        details["Description"] = desc.strip() or "No description available."
+
+    return details
 
 # ---------- Recommendations (cached) ----------
 
