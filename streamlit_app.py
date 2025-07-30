@@ -4,11 +4,6 @@
 Misiddons Book Database – Streamlit app
 """
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Misiddons Book Database – Streamlit app
-"""
 
 from __future__ import annotations
 
