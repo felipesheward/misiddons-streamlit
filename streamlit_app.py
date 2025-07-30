@@ -296,9 +296,9 @@ if isbn_input:
     else:
         with st.spinner('Fetching details…'):
             meta = fetch_book_details(isbn_input) or {}
-        if not meta:
-            st.error('Not found, fill manually')
-            meta['Title'] = st.text_input('Title*')
+        if not meta.get('Title'):
+            st.error('Book details not found – fill manually.')
+            meta['Title'] = st.text_input('Title *required*')
             meta['Author'] = st.text_input('Author', value='Unknown')
             meta['Genre'] = st.text_input('Genre', value='Unknown')
             meta['Language'] = st.text_input('Language', value='Unknown')
@@ -315,7 +315,7 @@ if isbn_input:
                 st.write(meta['Description'])
             b1, b2 = st.columns(2)
             with b1:
-                if st.button("➕ Add to Library", key=f"add_lib_{isbn_input}"):
+                if st.button('➕ Add to Library', key=f'add_lib_{isbn_input}'):
                     st.session_state['library'] = pd.concat(
                         [st.session_state['library'], pd.DataFrame([{'ISBN': isbn_input, **meta}])],
                         ignore_index=True
@@ -323,7 +323,7 @@ if isbn_input:
                     sync_session('library')
                     st.experimental_rerun()
             with b2:
-                if st.button("⭐ Add to Wishlist", key=f"add_wish_{isbn_input}"):
+                if st.button('⭐ Add to Wishlist', key=f'add_wish_{isbn_input}'):
                     st.session_state['wishlist'] = pd.concat(
                         [st.session_state['wishlist'], pd.DataFrame([{'ISBN': isbn_input, **meta}])],
                         ignore_index=True
@@ -332,7 +332,6 @@ if isbn_input:
                     st.experimental_rerun()
 
 st.divider()
-
 
 # --- Search ---
 st.subheader("Search for a Book")
