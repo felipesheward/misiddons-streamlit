@@ -318,22 +318,24 @@ if book_file:
                     st.write(details['Description'])
 
                 b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("Add to Library", key=f"add_lib_{isbn}"):
-                        library_df = pd.concat(
-                            [library_df, pd.DataFrame([{"ISBN": isbn, **details}])],
-                            ignore_index=True
-                        )
-                        sync_session("library")   # or sync_session("wishlist")
-                        st.success("Added to Library!")
-                with b2:
-                    if st.button("Add to Wishlist", key=f"add_wish_{isbn}"):
-                        wishlist_df = pd.concat(
-                            [wishlist_df, pd.DataFrame([{"ISBN": isbn, **details}])],
-                            ignore_index=True
-                        )
-                        sync_session("library")   # or sync_session("wishlist")
-                        st.success("Added to Wishlist!")
+             with b1:
+                 if st.button('➕ Add to Library'):
+                     st.session_state['library'] = pd.concat(
+                         [st.session_state['library'],
+                          pd.DataFrame([{'ISBN': isbn_input, **meta}])],
+                         ignore_index=True
+                     )
+                     sync_session('library')
+                     st.experimental_rerun()
+             with b2:
+                 if st.button('⭐ Add to Wishlist'):
+                     st.session_state['wishlist'] = pd.concat(
+                         [st.session_state['wishlist'],
+                          pd.DataFrame([{'ISBN': isbn_input, **meta}])],
+                         ignore_index=True
+                     )
+                     sync_session('wishlist')
+                     st.experimental_rerun()
     else:
         if zbar_decode is None:
             st.error("Barcode scanning module unavailable. Type the ISBN below.")
