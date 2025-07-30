@@ -4,8 +4,6 @@
 Misiddons Book Database – Streamlit app
 """
 
-
-
 from __future__ import annotations
 
 import random
@@ -264,74 +262,111 @@ if "library" not in st.session_state:
 if "wishlist" not in st.session_state:
     st.session_state["wishlist"] = load_db(WISHLIST_DB)
 
-library_df = st.session_state["library"]
-wishlist_df = st.session_state["wishlist"]
+library_df = st.session_state["library"].copy()
+wishlist_df = st.session_state["wishlist"].copy()
 
 # ---------- UI ----------
 st.title("Misiddons Book Database")
 
 # --- Scan section ---
-tab1, tab2 = st.tabs(['📷 Scan barcode', '✍️ Enter ISBN'])
-with tab1:
-    f = st.file_uploader('Upload barcode image', type=['jpg','jpeg','png'], key='scan')
-    isbn_scanned = None
-    if f:
-        img = Image.open(f)
-        isbn_scanned = scan_barcode(img)
-        if isbn_scanned:
-            st.success(f'ISBN detected: {isbn_scanned}')
-            st.image(img, caption=isbn_scanned, width=160)
+st.subheader("Scan Barcode to Add to Library or Wishlist")
+book_file = st.file_uploader("Upload a barcode image to add a book",
+                             type=["jpg","jpeg","png"], key="scan_book")
+
+if book_file:
+    img = Image.open(book_file)
+    isbn = scan_barcode(img)
+    if isbn:
+        st.success(f"ISBN Scanned: {isbn}")
+        in_lib = isbn in library_df["ISBN"].values
+        in_wish = isbn in wishlist_df["ISBN"].values
+
+        if in_lib or in_wish:
+            if in_lib and in_wish:
+                st.warning("Book already in library and wishlist.")
+            elif in_lib:
+                st.warning("Book already in library.")
+            else:
+                st.warning("Book already on wishlist.")
         else:
-            st.error('No barcode detected.')
-with tab2:
-    isbn_scanned = isbn_scanned or None
-    manual = st.text_input('ISBN', key='manual')
-    isbn_input = (manual or isbn_scanned or '').strip()
+            with st.spinner("Fetching book details..."):
+                details = fetch_book_details(isbn)
 
-if isbn_input:
-    if isbn_input in library_df['ISBN'].values:
-        st.warning('Book already in library')
-    elif isbn_input in wishlist_df['ISBN'].values:
-        st.warning('Book already on wishlist')
+            if not details:
+                st.error("Could not fetch book details.")
+                manual_title = st.text_input("Enter title manually:")
+                if manual_title:
+                    details = {
+                        "Title": manual_title,
+                        "Author": "Unknown",
+                        "Genre": "Unknown",
+                        "Language": "Unknown",
+                        "Thumbnail": "",
+                        "Description": "",
+                        "Rating": pd.NA
+                    }
+
+            if details:
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
+                    st.markdown(f"### {details['Title']}")
+                    st.write(f"*{details['Author']}*")
+                    st.write(details['Description'])
+
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Add to Library", key=f"add_lib_{isbn}"):
+                        library_df = pd.concat(
+                            [library_df, pd.DataFrame([{"ISBN": isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        st.success("Added to Library!")
+                with b2:
+                    if st.button("Add to Wishlist", key=f"add_wish_{isbn}"):
+                        wishlist_df = pd.concat(
+                            [wishlist_df, pd.DataFrame([{"ISBN": isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        st.success("Added to Wishlist!")
     else:
-        with st.spinner('Fetching details…'):
-            meta = fetch_book_details(isbn_input) or {}
-        if not meta.get('Title'):
-            st.error('Book details not found – fill manually.')
-            meta['Title'] = st.text_input('Title *required*')
-            meta['Author'] = st.text_input('Author', value='Unknown')
-            meta['Genre'] = st.text_input('Genre', value='Unknown')
-            meta['Language'] = st.text_input('Language', value='Unknown')
-            meta['Thumbnail'] = ''
-            meta['Description'] = st.text_area('Description')
-            meta['Rating'] = pd.NA
-        if meta.get('Title'):
-            c1, c2 = st.columns([1, 3])
-            if meta.get('Thumbnail', '').startswith('http'):
-                c1.image(meta['Thumbnail'], width=120)
-            with c2:
-                st.markdown(f"### {meta['Title']}")
-                st.caption(meta['Author'])
-                st.write(meta['Description'])
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button('➕ Add to Library', key=f'add_lib_{isbn_input}'):
-                    st.session_state['library'] = pd.concat(
-                        [st.session_state['library'], pd.DataFrame([{'ISBN': isbn_input, **meta}])],
-                        ignore_index=True
-                    )
-                    sync_session('library')
-                    st.experimental_rerun()
-            with b2:
-                if st.button('⭐ Add to Wishlist', key=f'add_wish_{isbn_input}'):
-                    st.session_state['wishlist'] = pd.concat(
-                        [st.session_state['wishlist'], pd.DataFrame([{'ISBN': isbn_input, **meta}])],
-                        ignore_index=True
-                    )
-                    sync_session('wishlist')
-                    st.experimental_rerun()
-
-st.divider()
+        if zbar_decode is None:
+            st.error("Barcode scanning module unavailable. Type the ISBN below.")
+        else:
+            st.error("No barcode detected. Try a clearer photo or enter ISBN manually.")
+        manual_isbn = st.text_input("ISBN (manual):", "")
+        if manual_isbn:
+            with st.spinner("Fetching book details..."):
+                details = fetch_book_details(manual_isbn)
+            if details:
+                st.success(f"Got details for {manual_isbn}")
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
+                    st.markdown(f"### {details['Title']}")
+                    st.write(f"*{details['Author']}*")
+                    st.write(details['Description'])
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Add to Library", key=f"add_lib_manual_{manual_isbn}"):
+                        library_df = pd.concat(
+                            [library_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        st.success("Added to Library!")
+                with b2:
+                    if st.button("Add to Wishlist", key=f"add_wish_manual_{manual_isbn}"):
+                        wishlist_df = pd.concat(
+                            [wishlist_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        st.success("Added to Wishlist!")
 
 # --- Search ---
 st.subheader("Search for a Book")
@@ -379,7 +414,7 @@ if not unrated.empty:
 
     if st.button("Save Rating", key=f"save_rate_{book['ISBN']}"):
         library_df.at[idx0, "Rating"] = rating
-        sync_session("library")   # or sync_session("wishlist")
+        st.session_state["library"] = save_db(library_df, BOOK_DB)
         st.success(f"Saved rating {rating} for '{book['Title']}'")
         del st.session_state["rate_current_isbn"]
         del st.session_state[rating_key]
