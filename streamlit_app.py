@@ -4,6 +4,12 @@
 Misiddons Book Database – Streamlit app
 """
 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Misiddons Book Database – Streamlit app
+"""
+
 from __future__ import annotations
 
 import random
@@ -17,9 +23,9 @@ from PIL import Image, ImageOps
 
 # ---------- OPTIONAL barcode support ----------
 try:
-    from pyzbar.pyzbar import decode as zbar_decode  # requires system libzbar
-except Exception:
-    zbar_decode = None  # app still runs without barcode scanning
+    from pyzbar.pyzbar import decode as zbar_decode
+except Exception:   # pyzbar / libzbar missing in environment
+    zbar_decode = None
 
 # ---------- Streamlit config ----------
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
@@ -37,13 +43,14 @@ st.markdown(
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 DATA_DIR.mkdir(exist_ok=True)
+
 BOOK_DB = DATA_DIR / "books_database.csv"
 WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
-# ---------- Persistence helpers ----------
+# ---------- Data helpers ----------
 
 def load_db(path: Path) -> pd.DataFrame:
-    """Load a CSV, or create an empty frame if missing."""
+    """Load a CSV into a DataFrame (creating an empty one if absent)."""
     try:
         df = pd.read_csv(path, dtype={"ISBN": str})
     except FileNotFoundError:
@@ -59,54 +66,76 @@ def load_db(path: Path) -> pd.DataFrame:
                 "Rating",
             ]
         )
+
+    # Ensure Rating exists & is numeric where possible
     if "Rating" not in df.columns:
         df["Rating"] = pd.NA
     else:
         df["Rating"] = pd.to_numeric(df["Rating"], errors="coerce")
+
     return df
 
 
 def save_db(df: pd.DataFrame, path: Path) -> None:
-    """Write *df* to *path* (CSV)."""
+    """Persist *df* to *path* as CSV."""
     df = df.copy()
     df["ISBN"] = df["ISBN"].astype(str)
+    if "Rating" not in df.columns:
+        df["Rating"] = pd.NA
     df.to_csv(path, index=False)
 
 
+# ---------- NEW – persistence wrapper ----------
+
 def sync_session(name: str) -> None:
-    """Persist the named DataFrame ("library" or "wishlist")."""
+    """Write the in‑memory DataFrame to disk & keep session in sync.
+
+    ``name`` must be either "library" or "wishlist".
+    """
     if name == "library":
         save_db(st.session_state[name], BOOK_DB)
     elif name == "wishlist":
         save_db(st.session_state[name], WISHLIST_DB)
     else:
-        raise ValueError(name)
+        raise ValueError("Unknown DataFrame: " + name)
 
-# ---------- Barcode ----------
+
+# ---------- Barcode utilities ----------
 
 def scan_barcode(image: Image.Image) -> str | None:
+    """Try to decode a barcode (EAN/ISBN) from *image*."""
     if zbar_decode is None:
         return None
     img = ImageOps.exif_transpose(image).convert("RGB")
-    res = zbar_decode(img) or zbar_decode(img.resize((img.width * 2, img.height * 2)))
+    res = zbar_decode(img)
+    if not res:  # try up‑scaled version for low‑res photos
+        big = img.resize((img.width * 2, img.height * 2))
+        res = zbar_decode(big)
     return res[0].data.decode("utf-8") if res else None
 
-# ---------- External book look‑ups ----------
 
-def _clip(text: str | None, n: int = 300):
+# ---------- Book API helpers ----------
+
+def _clip(text: str | None, n: int = 300) -> str:
     text = (text or "").strip()
-    return text[:n] + ("..." if len(text) > n else "") if text else "No description."
+    return text[:n] + ("..." if len(text) > n else "") if text else "No description available."
 
 
-def _norm_lang(code: str | None):
+def _norm_lang(code: str | None) -> str:
     return (code or "").upper() or "Unknown"
 
 
+# -- Google Books --
+
 def fetch_from_google(isbn: str) -> dict | None:
     url = "https://www.googleapis.com/books/v1/volumes"
-    r = requests.get(url, params={"q": f"isbn:{isbn}"}, timeout=12)
-    if not r.ok:
-        return None
+    r = requests.get(
+        url,
+        params={"q": f"isbn:{isbn}"},
+        timeout=12,
+        headers={"User-Agent": "misiddons/1.0"},
+    )
+    r.raise_for_status()
     items = r.json().get("items", [])
     if not items:
         return None
@@ -123,26 +152,35 @@ def fetch_from_google(isbn: str) -> dict | None:
     }
 
 
+# -- OpenLibrary fallback --
+
 def fetch_from_openlibrary(isbn: str) -> dict | None:
     r = requests.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=12)
     if r.status_code != 200:
         return None
     j = r.json()
+    title = j.get("title", "Unknown Title")
+
+    # Authors
     authors = []
     for a in j.get("authors", []):
         ar = requests.get(f"https://openlibrary.org{a['key']}.json", timeout=6)
         if ar.ok:
             authors.append(ar.json().get("name", "Unknown Author"))
+
     cover_id = j.get("covers", [None])[0]
     thumb = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ""
+
     desc = j.get("description", "")
     if isinstance(desc, dict):
         desc = desc.get("value", "")
+
     lang = "Unknown"
     if j.get("languages"):
         lang = j["languages"][0].get("key", "").split("/")[-1].upper() or "Unknown"
+
     return {
-        "Title": j.get("title", "Unknown Title"),
+        "Title": title,
         "Author": ", ".join(authors) if authors else "Unknown Author",
         "Genre": "Unknown",
         "Language": lang,
@@ -152,88 +190,189 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
     }
 
 
+# -- unified fetch --
+
 def fetch_book_details(isbn: str) -> dict | None:
     isbn = isbn.replace("-", "").strip()
-    return fetch_from_google(isbn) or fetch_from_openlibrary(isbn)
+    try:
+        if details := fetch_from_google(isbn):
+            return details
+    except Exception:
+        pass
+    try:
+        return fetch_from_openlibrary(isbn)
+    except Exception:
+        return None
 
-# ---------- Session‑state init ----------
+
+# ---------- Recommendations (cached) ----------
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dict]:
+    """Pull up to *max_results* books by *author* from Google Books/OpenLibrary."""
+
+    def clip(t: str | None, n: int = 300):
+        t = (t or "").strip()
+        return t[:n] + ("..." if len(t) > n else "") if t else "No description available."
+
+    out: list[dict] = []
+
+    # ---- Google Books ----
+    try:
+        url = "https://www.googleapis.com/books/v1/volumes"
+        params = {"q": f'inauthor:"{author}"', "maxResults": max_results}
+        r = requests.get(url, params=params, timeout=8)
+        r.raise_for_status()
+        for item in r.json().get("items", []):
+            info = item.get("volumeInfo", {})
+            desc = info.get("description") or item.get("searchInfo", {}).get("textSnippet")
+            out.append({
+                "Title": info.get("title", "Unknown Title"),
+                "Authors": ", ".join(info.get("authors", ["Unknown Author"])),
+                "Year": info.get("publishedDate", "").split("-")[0] or "Unknown",
+                "Rating": info.get("averageRating", "N/A"),
+                "Thumbnail": info.get("imageLinks", {}).get("thumbnail", ""),
+                "Description": clip(desc)
+            })
+    except Exception:
+        pass
+
+    if len(out) >= max_results:
+        return out[:max_results]
+
+    # ---- OpenLibrary fallback ----
+    try:
+        url = f"https://openlibrary.org/search.json?author={quote(author)}&limit={max_results}"
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            for d in r.json().get("docs", []):
+                cover_id = d.get("cover_i")
+                thumb = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ""
+                desc = d.get("first_sentence") or d.get("subtitle") or ""
+                out.append({
+                    "Title": d.get("title", "Unknown Title"),
+                    "Authors": ", ".join(d.get("author_name", ["Unknown Author"])),
+                    "Year": str(d.get("first_publish_year", "Unknown")),
+                    "Rating": "N/A",
+                    "Thumbnail": thumb,
+                    "Description": clip(desc)
+                })
+    except Exception:
+        pass
+
+    return out[:max_results]
+
+# ---------- Session state ----------
 if "library" not in st.session_state:
     st.session_state["library"] = load_db(BOOK_DB)
 if "wishlist" not in st.session_state:
     st.session_state["wishlist"] = load_db(WISHLIST_DB)
 
-# Direct references – **no .copy()**
-library_df: pd.DataFrame = st.session_state["library"]
-wishlist_df: pd.DataFrame = st.session_state["wishlist"]
+library_df = st.session_state["library"].copy()
+wishlist_df = st.session_state["wishlist"].copy()
 
 # ---------- UI ----------
-st.title("📚 Misiddons Book Database")
+st.title("Misiddons Book Database")
 
-# --- Add section -------------------------------------------------------
-add_tabs = st.tabs(["📷 Scan barcode", "✍️ Enter ISBN"])
+# --- Scan section ---
+st.subheader("Scan Barcode to Add to Library or Wishlist")
+book_file = st.file_uploader("Upload a barcode image to add a book",
+                             type=["jpg","jpeg","png"], key="scan_book")
 
-with add_tabs[0]:  # Scan
-    file = st.file_uploader("Upload a barcode image", type=["jpg", "jpeg", "png"], key="scan")
-    isbn_scanned = None
-    if file:
-        img = Image.open(file)
-        isbn_scanned = scan_barcode(img)
-        if isbn_scanned:
-            st.success(f"ISBN detected: {isbn_scanned}")
-            st.image(img, caption=isbn_scanned, width=160)
+if book_file:
+    img = Image.open(book_file)
+    isbn = scan_barcode(img)
+    if isbn:
+        st.success(f"ISBN Scanned: {isbn}")
+        in_lib = isbn in library_df["ISBN"].values
+        in_wish = isbn in wishlist_df["ISBN"].values
+
+        if in_lib or in_wish:
+            if in_lib and in_wish:
+                st.warning("Book already in library and wishlist.")
+            elif in_lib:
+                st.warning("Book already in library.")
+            else:
+                st.warning("Book already on wishlist.")
         else:
-            st.error("Barcode not recognised.")
+            with st.spinner("Fetching book details..."):
+                details = fetch_book_details(isbn)
 
-with add_tabs[1]:  # Manual
-    manual_isbn = st.text_input("ISBN", key="manual")
+            if not details:
+                st.error("Could not fetch book details.")
+                manual_title = st.text_input("Enter title manually:")
+                if manual_title:
+                    details = {
+                        "Title": manual_title,
+                        "Author": "Unknown",
+                        "Genre": "Unknown",
+                        "Language": "Unknown",
+                        "Thumbnail": "",
+                        "Description": "",
+                        "Rating": pd.NA
+                    }
 
-isbn = (isbn_scanned or manual_isbn or "").strip()
-if isbn:
-    if isbn in library_df["ISBN"].values:
-        st.warning("Book already in your library")
-    elif isbn in wishlist_df["ISBN"].values:
-        st.warning("Book already on your wishlist")
+            if details:
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
+                    st.markdown(f"### {details['Title']}")
+                    st.write(f"*{details['Author']}*")
+                    st.write(details['Description'])
+
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Add to Library", key=f"add_lib_{isbn}"):
+                        library_df = pd.concat(
+                            [library_df, pd.DataFrame([{"ISBN": isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        st.success("Added to Library!")
+                with b2:
+                    if st.button("Add to Wishlist", key=f"add_wish_{isbn}"):
+                        wishlist_df = pd.concat(
+                            [wishlist_df, pd.DataFrame([{"ISBN": isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        st.success("Added to Wishlist!")
     else:
-        with st.spinner("Fetching book details…"):
-            meta = fetch_book_details(isbn) or {}
-        if not meta:
-            st.error("Book details not found – fill in manually.")
-            meta["Title"] = st.text_input("Title *required*")
-            meta["Author"] = st.text_input("Author", value="Unknown")
-            meta["Genre"] = st.text_input("Genre", value="Unknown")
-            meta["Language"] = st.text_input("Language", value="Unknown")
-            meta["Thumbnail"] = ""
-            meta["Description"] = st.text_area("Description", value="")
-            meta["Rating"] = pd.NA
-
-        if meta.get("Title"):
-            # preview
-            c1, c2 = st.columns([1, 3])
-            if meta.get("Thumbnail", "").startswith("http"):
-                c1.image(meta["Thumbnail"], width=120)
-            with c2:
-                st.markdown(f"### {meta['Title']}")
-                st.caption(meta["Author"])
-                st.write(meta["Description"])
-            d1, d2 = st.columns(2)
-            with d1:
-                if st.button("➕ Add to Library"):
-                    st.session_state["library"] = pd.concat(
-                        [library_df, pd.DataFrame([{"ISBN": isbn, **meta}])],
-                        ignore_index=True,
-                    )
-                    sync_session("library")
-                    st.experimental_rerun()
-            with d2:
-                if st.button("⭐ Add to Wishlist"):
-                    st.session_state["wishlist"] = pd.concat(
-                        [wishlist_df, pd.DataFrame([{"ISBN": isbn, **meta}])],
-                        ignore_index=True,
-                    )
-                    sync_session("wishlist")
-                    st.experimental_rerun()
-
-st.divider()
+        if zbar_decode is None:
+            st.error("Barcode scanning module unavailable. Type the ISBN below.")
+        else:
+            st.error("No barcode detected. Try a clearer photo or enter ISBN manually.")
+        manual_isbn = st.text_input("ISBN (manual):", "")
+        if manual_isbn:
+            with st.spinner("Fetching book details..."):
+                details = fetch_book_details(manual_isbn)
+            if details:
+                st.success(f"Got details for {manual_isbn}")
+                col1, col2 = st.columns([1,3])
+                if details.get("Thumbnail","").startswith("http"):
+                    col1.image(details["Thumbnail"], width=120)
+                with col2:
+                    st.markdown(f"### {details['Title']}")
+                    st.write(f"*{details['Author']}*")
+                    st.write(details['Description'])
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Add to Library", key=f"add_lib_manual_{manual_isbn}"):
+                        library_df = pd.concat(
+                            [library_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        st.success("Added to Library!")
+                with b2:
+                    if st.button("Add to Wishlist", key=f"add_wish_manual_{manual_isbn}"):
+                        wishlist_df = pd.concat(
+                            [wishlist_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
+                            ignore_index=True
+                        )
+                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        st.success("Added to Wishlist!")
 
 # --- Search ---
 st.subheader("Search for a Book")
@@ -392,3 +531,4 @@ if not library_df.empty:
                         st.write(f"Year: {rec['Year']}  |  Rating: {rec['Rating']}")
                         st.write(rec["Description"] or "No description available.")
                 st.markdown("---")
+
