@@ -3,15 +3,7 @@
 """
 Misiddons Book Database – Streamlit app
 """
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Misiddons Book Database – Streamlit App (Final Working Version)
 
-- Directly updates session state DataFrames (no .copy()).
-- Persists every change immediately to CSV via sync_session().
-- Barcode scan, manual ISBN entry, search, rating, and wishlist support.
-"""
 
 from __future__ import annotations
 import random
