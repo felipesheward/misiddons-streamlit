@@ -4,18 +4,21 @@
 Misiddons Book Database – Streamlit app
 """
 
+from __future__ import annotations
+
 import random
-import requests
-import pandas as pd
-import streamlit as st
 from pathlib import Path
-from PIL import Image, ImageOps
 from urllib.parse import quote
+
+import pandas as pd
+import requests
+import streamlit as st
+from PIL import Image, ImageOps
 
 # ---------- OPTIONAL barcode support ----------
 try:
     from pyzbar.pyzbar import decode as zbar_decode
-except Exception:   # pyzbar/libzbar missing in environment
+except Exception:   # pyzbar / libzbar missing in environment
     zbar_decode = None
 
 # ---------- Streamlit config ----------
@@ -24,10 +27,10 @@ st.markdown(
     """
     <style>
     [data-testid=column]:not(:last-child){margin-right:1rem;}
-    .stButton > button{width:100%;}
+    .stButton > button{width:100%; text-wrap:balance;}
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 # ---------- Paths ----------
@@ -39,52 +42,93 @@ BOOK_DB = DATA_DIR / "books_database.csv"
 WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
 # ---------- Data helpers ----------
+
 def load_db(path: Path) -> pd.DataFrame:
+    """Load a CSV into a DataFrame (creating an empty one if absent)."""
     try:
         df = pd.read_csv(path, dtype={"ISBN": str})
     except FileNotFoundError:
-        df = pd.DataFrame(columns=[
-            "ISBN","Title","Author","Genre","Language",
-            "Thumbnail","Description","Rating"
-        ])
+        df = pd.DataFrame(
+            columns=[
+                "ISBN",
+                "Title",
+                "Author",
+                "Genre",
+                "Language",
+                "Thumbnail",
+                "Description",
+                "Rating",
+            ]
+        )
+
+    # Ensure Rating exists & is numeric where possible
     if "Rating" not in df.columns:
         df["Rating"] = pd.NA
     else:
         df["Rating"] = pd.to_numeric(df["Rating"], errors="coerce")
+
     return df
 
-def save_db(df: pd.DataFrame, path: Path) -> pd.DataFrame:
+
+def save_db(df: pd.DataFrame, path: Path) -> None:
+    """Persist *df* to *path* as CSV."""
     df = df.copy()
     df["ISBN"] = df["ISBN"].astype(str)
     if "Rating" not in df.columns:
         df["Rating"] = pd.NA
     df.to_csv(path, index=False)
-    return df
 
-# ---------- Barcode ----------
+
+# ---------- NEW – persistence wrapper ----------
+
+def sync_session(name: str) -> None:
+    """Write the in‑memory DataFrame to disk & keep session in sync.
+
+    ``name`` must be either "library" or "wishlist".
+    """
+    if name == "library":
+        save_db(st.session_state[name], BOOK_DB)
+    elif name == "wishlist":
+        save_db(st.session_state[name], WISHLIST_DB)
+    else:
+        raise ValueError("Unknown DataFrame: " + name)
+
+
+# ---------- Barcode utilities ----------
+
 def scan_barcode(image: Image.Image) -> str | None:
-    """Decode a barcode (if pyzbar is available)."""
+    """Try to decode a barcode (EAN/ISBN) from *image*."""
     if zbar_decode is None:
         return None
     img = ImageOps.exif_transpose(image).convert("RGB")
     res = zbar_decode(img)
-    if not res:
+    if not res:  # try up‑scaled version for low‑res photos
         big = img.resize((img.width * 2, img.height * 2))
         res = zbar_decode(big)
     return res[0].data.decode("utf-8") if res else None
 
-# ---------- Book API utilities ----------
+
+# ---------- Book API helpers ----------
+
 def _clip(text: str | None, n: int = 300) -> str:
     text = (text or "").strip()
     return text[:n] + ("..." if len(text) > n else "") if text else "No description available."
 
+
 def _norm_lang(code: str | None) -> str:
     return (code or "").upper() or "Unknown"
 
+
+# -- Google Books --
+
 def fetch_from_google(isbn: str) -> dict | None:
     url = "https://www.googleapis.com/books/v1/volumes"
-    r = requests.get(url, params={"q": f"isbn:{isbn}"}, timeout=12,
-                     headers={"User-Agent": "misiddons/1.0"})
+    r = requests.get(
+        url,
+        params={"q": f"isbn:{isbn}"},
+        timeout=12,
+        headers={"User-Agent": "misiddons/1.0"},
+    )
     r.raise_for_status()
     items = r.json().get("items", [])
     if not items:
@@ -101,6 +145,9 @@ def fetch_from_google(isbn: str) -> dict | None:
         "Rating": pd.NA,
     }
 
+
+# -- OpenLibrary fallback --
+
 def fetch_from_openlibrary(isbn: str) -> dict | None:
     r = requests.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=12)
     if r.status_code != 200:
@@ -108,7 +155,7 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
     j = r.json()
     title = j.get("title", "Unknown Title")
 
-    # authors
+    # Authors
     authors = []
     for a in j.get("authors", []):
         ar = requests.get(f"https://openlibrary.org{a['key']}.json", timeout=6)
@@ -136,12 +183,14 @@ def fetch_from_openlibrary(isbn: str) -> dict | None:
         "Rating": pd.NA,
     }
 
+
+# -- unified fetch --
+
 def fetch_book_details(isbn: str) -> dict | None:
     isbn = isbn.replace("-", "").strip()
     try:
-        d = fetch_from_google(isbn)
-        if d:
-            return d
+        if details := fetch_from_google(isbn):
+            return details
     except Exception:
         pass
     try:
@@ -149,14 +198,18 @@ def fetch_book_details(isbn: str) -> dict | None:
     except Exception:
         return None
 
+
+# ---------- Recommendations (cached) ----------
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dict]:
-    """Return recs using Google Books, then OpenLibrary with better description fallback."""
-    def clip(t, n=300):
+    """Pull up to *max_results* books by *author* from Google Books/OpenLibrary."""
+
+    def clip(t: str | None, n: int = 300):
         t = (t or "").strip()
         return t[:n] + ("..." if len(t) > n else "") if t else "No description available."
 
-    out = []
+    out: list[dict] = []
 
     # ---- Google Books ----
     try:
