@@ -4,6 +4,8 @@
 Misiddons Book Database – Streamlit app
 """
 
+
+
 from __future__ import annotations
 
 import random
@@ -227,13 +229,12 @@ else:
             with lc2: st.write(row.Description)
             curr=int(row.Rating) if pd.notna(row.Rating) else 0
             new = st.slider(
-    'Rate this book',     # label
-    0,                     # min
-    5,                     # max
-    curr,                  # default value
-    key=f"rate_{row.ISBN}" # unique key
+    'Rate this book',  # label
+    0,                  # min
+    5,                  # max
+    curr,               # default value
+    key=f"rate_{row.ISBN}"  # unique key
 )
-
             if new!=curr:
                 idx=library_df.index[library_df['ISBN']==row.ISBN][0]
                 library_df.at[idx,'Rating']=new
@@ -306,5 +307,6 @@ if not library_df.empty:
             st.info('No recommendations found.')
 
 # --- End of App ---
+
 
 
