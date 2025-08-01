@@ -13,7 +13,9 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 from PIL import Image, ImageOps
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ---------- OPTIONAL barcode support ----------
 try:
@@ -43,55 +45,28 @@ WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
 # ---------- Data helpers ----------
 
-def load_db(path: Path) -> pd.DataFrame:
-    """Load a CSV into a DataFrame (creating an empty one if absent)."""
-    try:
-        df = pd.read_csv(path, dtype={"ISBN": str})
-    except FileNotFoundError:
-        df = pd.DataFrame(
-            columns=[
-                "ISBN",
-                "Title",
-                "Author",
-                "Genre",
-                "Language",
-                "Thumbnail",
-                "Description",
-                "Rating",
-            ]
-        )
 
-    # Ensure Rating exists & is numeric where possible
-    if "Rating" not in df.columns:
-        df["Rating"] = pd.NA
-    else:
-        df["Rating"] = pd.to_numeric(df["Rating"], errors="coerce")
+@st.cache_data(ttl=0)      # always get a fresh copy
+def load_sheet(tab: str) -> pd.DataFrame:
+    """
+    Fetch the entire Google-Sheets *tab* and return it as a DataFrame.
+    `tab` must match the worksheet name exactly (e.g., 'Library').
+    """
+    return conn.read(worksheet=tab)
 
-    return df
-
-
-def save_db(df: pd.DataFrame, path: Path) -> None:
-    """Persist *df* to *path* as CSV."""
-    df = df.copy()
-    df["ISBN"] = df["ISBN"].astype(str)
-    if "Rating" not in df.columns:
-        df["Rating"] = pd.NA
-    df.to_csv(path, index=False)
 
 
 # ---------- NEW – persistence wrapper ----------
 
 def sync_session(name: str) -> None:
-    """Write the in‑memory DataFrame to disk & keep session in sync.
-
-    ``name`` must be either "library" or "wishlist".
     """
-    if name == "library":
-        save_db(st.session_state[name], BOOK_DB)
-    elif name == "wishlist":
-        save_db(st.session_state[name], WISHLIST_DB)
-    else:
-        raise ValueError("Unknown DataFrame: " + name)
+    Push the DataFrame stored in st.session_state[name] to the worksheet
+    whose title is `name.capitalize()` ('library' → 'Library').
+    """
+    conn.update(
+        worksheet=name.capitalize(),
+        data=st.session_state[name]      # the DataFrame to write
+    )
 
 
 # ---------- Barcode utilities ----------
@@ -258,11 +233,11 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
 
 # ---------- Session state ----------
 if "library" not in st.session_state:
-    st.session_state["library"] = load_db(BOOK_DB)
+    st.session_state["library"] = load_sheet("Library")
 if "wishlist" not in st.session_state:
-    st.session_state["wishlist"] = load_db(WISHLIST_DB)
+    st.session_state["wishlist"] = load_sheet("Wishlist")
 
-library_df  = st.session_state["library"]        
+library_df = st.session_state["library"]      
 wishlist_df = st.session_state["wishlist"]       
 
 # ---------- UI ----------
