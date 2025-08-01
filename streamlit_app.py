@@ -347,12 +347,13 @@ if book_file:
                 b1, b2 = st.columns(2)
                 with b1:
                     if st.button("Add to Library", key=f"add_lib_manual_{manual_isbn}"):
-                        library_df.loc[len(library_df)] = {"ISBN": isbn, **details}
+                        library_df.loc[len(library_df)] = {"ISBN": manual_isbn, **details}
                         sync_session("library")
+                        st.toast(f"Rows in {name}: {len(st.session_state[name])}")   # DEBUG – remove later
                         st.success("Added to Library!")
                 with b2:
                     if st.button("Add to Wishlist", key=f"add_wish_manual_{manual_isbn}"):
-                        wishlist_df.loc[len(wishlist_df)] = {"ISBN": isbn, **details}
+                        wishlist_df.loc[len(wishlist_df)] = {"ISBN": manual_isbn, **details}
                         sync_session("wishlist")
                         st.success("Added to Wishlist!")
 
