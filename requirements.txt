@@ -1,4 +1,5 @@
-streamlit
+streamlit>=1.28
+st-gsheets-connection      
 pandas
 Pillow
 requests
