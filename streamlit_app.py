@@ -262,8 +262,8 @@ if "library" not in st.session_state:
 if "wishlist" not in st.session_state:
     st.session_state["wishlist"] = load_db(WISHLIST_DB)
 
-library_df = st.session_state["library"].copy()
-wishlist_df = st.session_state["wishlist"].copy()
+library_df  = st.session_state["library"]        
+wishlist_df = st.session_state["wishlist"]       
 
 # ---------- UI ----------
 st.title("Misiddons Book Database")
