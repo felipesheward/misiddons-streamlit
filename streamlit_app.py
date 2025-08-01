@@ -357,7 +357,7 @@ if book_file:
                             [library_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
                             ignore_index=True
                         )
-                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        sync_session("library")
                         st.success("Added to Library!")
                 with b2:
                     if st.button("Add to Wishlist", key=f"add_wish_manual_{manual_isbn}"):
