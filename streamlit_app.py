@@ -349,7 +349,6 @@ if book_file:
                     if st.button("Add to Library", key=f"add_lib_manual_{manual_isbn}"):
                         library_df.loc[len(library_df)] = {"ISBN": manual_isbn, **details}
                         sync_session("library")
-                        st.toast(f"Rows in {name}: {len(st.session_state[name])}")   # DEBUG – remove later
                         st.success("Added to Library!")
                 with b2:
                     if st.button("Add to Wishlist", key=f"add_wish_manual_{manual_isbn}"):
