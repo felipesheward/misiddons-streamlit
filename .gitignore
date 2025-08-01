@@ -1,0 +1,2 @@
+# keep Google credentials local
+.streamlit/secrets.toml
