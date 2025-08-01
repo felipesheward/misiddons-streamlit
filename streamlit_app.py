@@ -322,7 +322,7 @@ if book_file:
                             [library_df, pd.DataFrame([{"ISBN": isbn, **details}])],
                             ignore_index=True
                         )
-                        st.session_state["library"] = save_db(library_df, BOOK_DB)
+                        sync_session("library")
                         st.success("Added to Library!")
                 with b2:
                     if st.button("Add to Wishlist", key=f"add_wish_{isbn}"):
@@ -330,7 +330,7 @@ if book_file:
                             [wishlist_df, pd.DataFrame([{"ISBN": isbn, **details}])],
                             ignore_index=True
                         )
-                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        sync_session("wishlist")
                         st.success("Added to Wishlist!")
     else:
         if zbar_decode is None:
@@ -365,7 +365,7 @@ if book_file:
                             [wishlist_df, pd.DataFrame([{"ISBN": manual_isbn, **details}])],
                             ignore_index=True
                         )
-                        st.session_state["wishlist"] = save_db(wishlist_df, WISHLIST_DB)
+                        sync_session("wishlist")
                         st.success("Added to Wishlist!")
 
 # --- Search ---
@@ -414,7 +414,7 @@ if not unrated.empty:
 
     if st.button("Save Rating", key=f"save_rate_{book['ISBN']}"):
         library_df.at[idx0, "Rating"] = rating
-        st.session_state["library"] = save_db(library_df, BOOK_DB)
+        sync_session("library")
         st.success(f"Saved rating {rating} for '{book['Title']}'")
         del st.session_state["rate_current_isbn"]
         del st.session_state[rating_key]
