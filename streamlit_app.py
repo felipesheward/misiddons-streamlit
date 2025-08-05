@@ -46,7 +46,6 @@ WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 # ---------- Data helpers ----------
 
 
-@st.cache_data(ttl=0)      # always get a fresh copy
 def load_sheet(tab: str) -> pd.DataFrame:
     """
     Fetch the entire Google-Sheets *tab* and return it as a DataFrame.
