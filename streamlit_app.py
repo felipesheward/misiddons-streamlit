@@ -3,15 +3,17 @@
 """
 Misiddons Book Database – Streamlit app
 """
-
 import pandas as pd
 import requests
 import streamlit as st
-from gspread.exceptions import WorksheetNotFound
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 from urllib.parse import quote
-from PIL import Image, ImageOps
-import io
+from PIL import Image
+
+# ---------- CONFIGURATION ----------
+# IMPORTANT: Set your Google Sheet name here
+GOOGLE_SHEET_NAME = "Misiddons Book Databse" # Or whatever your sheet is named
 
 # ---------- OPTIONAL barcode support ----------
 try:
@@ -30,102 +32,94 @@ st.markdown("""
 
 # ---------- Functions ----------
 
-@st.cache_resource(ttl=3600)
-def get_connection():
-    """Create and cache the connection to Google Sheets."""
-    return st.connection("gsheets", type=GSheetsConnection)
+@st.cache_resource
+def connect_to_gsheets():
+    """Establish and cache a connection to Google Sheets."""
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scopes
+        )
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"Failed to connect to Google Sheets. Please check your credentials. Error: {e}")
+        return None
 
 @st.cache_data(ttl=60)
-def load_data(worksheet_name: str) -> pd.DataFrame:
-    """Safely fetch a worksheet from Google Sheets."""
+def load_data(client: gspread.Client, worksheet_name: str) -> pd.DataFrame:
+    """Safely fetch a worksheet and return it as a pandas DataFrame."""
+    if client is None:
+        return pd.DataFrame()
     try:
-        conn = get_connection()
-        sheet = conn.read(worksheet=worksheet_name, usecols=list(range(20)), ttl=60)
-        return sheet.dropna(axis=0, how="all")
-    except WorksheetNotFound:
-        # Return an empty DataFrame with expected columns to prevent other errors
-        st.error(f"Worksheet '{worksheet_name}' not found in your Google Sheet. Please create a tab with this exact name.")
-        return pd.DataFrame()
+        spreadsheet = client.open(GOOGLE_SHEET_NAME)
+        worksheet = spreadsheet.worksheet(worksheet_name)
+        df = pd.DataFrame(worksheet.get_all_records())
+        return df.dropna(axis=0, how="all")
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error(f"Spreadsheet '{GOOGLE_SHEET_NAME}' not found. Please check the name in the script and your sharing permissions.")
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(f"Worksheet '{worksheet_name}' not found. Please create a tab with this exact name.")
     except Exception as e:
-        st.error(f"An error occurred while loading data: {e}")
-        return pd.DataFrame()
+        st.error(f"An error occurred while loading data from worksheet '{worksheet_name}': {e}")
+    return pd.DataFrame()
 
-@st.cache_data(ttl=86400) # Cache for one day
+@st.cache_data(ttl=86400)
 def get_book_details(isbn: str) -> dict:
-    """Fetch book details from Google Books API by ISBN."""
-    if not isbn or not isinstance(isbn, str) or len(isbn) < 10:
-        return {}
+    if not isbn or not isinstance(isbn, str) or len(isbn) < 10: return {}
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}")
     if r.status_code == 200:
         data = r.json()
-        if "items" in data:
-            return data["items"][0]
+        if "items" in data: return data["items"][0]
     return {}
 
-@st.cache_data(ttl=86400) # Cache for one day
+@st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list:
-    """Fetch recommendations from Google Books API by author."""
-    if not author:
-        return []
+    if not author: return []
     safe_author = quote(author)
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=inauthor:{safe_author}")
     if r.status_code == 200:
         data = r.json()
-        if "items" in data:
-            return data["items"]
+        if "items" in data: return data["items"]
     return []
+
 
 # ---------- Main App Logic ----------
 
-# Establish connection
-conn = get_connection()
+client = connect_to_gsheets()
 
-# Load data with error handling
-library_df = load_data(worksheet_name="Library")
-wishlist_df = load_data(worksheet_name="Wishlist")
+library_df = load_data(client, "Library")
+wishlist_df = load_data(client, "Wishlist")
 
-# Stop the app if essential sheets failed to load
-if library_df.empty and wishlist_df.empty:
-    st.error("Could not load 'Library' or 'Wishlist' worksheets. Please check your Google Sheet and refresh.")
+if client and (library_df.empty and wishlist_df.empty):
+    st.warning("Could not load data from 'Library' or 'Wishlist'. Please check the error messages above and refresh the page.")
     st.stop()
 
 # ----- APP UI -----
 
 st.title("Misiddons Book Database")
 
-# ---------- Book Entry Form ----------
 st.header("Add a new book")
-entry_form = st.form(key="entry_form")
-form_cols = entry_form.columns([1, 1, 1, 1, 1])
+with st.form(key="entry_form"):
+    form_cols = st.columns([1, 1, 1, 1, 1])
+    title = form_cols[0].text_input("Title")
+    author = form_cols[1].text_input("Author")
+    isbn = form_cols[2].text_input("ISBN")
+    date_read = form_cols[3].text_input("Date Read")
+    list_choice = form_cols[4].radio("Add to list:", ["Library", "Wishlist"], horizontal=True)
+    
+    if st.form_submit_button("Add Book"):
+        if title and author:
+            try:
+                sheet_to_update = client.open(GOOGLE_SHEET_NAME).worksheet(list_choice)
+                # Append a row with the correct column order
+                sheet_to_update.append_row([title, author, isbn, date_read])
+                st.success(f"'{title}' added to your {list_choice}!")
+                st.cache_data.clear() # Refresh data
+            except Exception as e:
+                st.error(f"Failed to add book: {e}")
+        else:
+            st.warning("Please enter at least a title and author.")
 
-with form_cols[0]:
-    title = st.text_input("Title", key="title_in")
-with form_cols[1]:
-    author = st.text_input("Author", key="author_in")
-with form_cols[2]:
-    isbn = st.text_input("ISBN", key="isbn_in")
-with form_cols[3]:
-    date_read = st.text_input("Date Read", key="date_in")
-with form_cols[4]:
-    list_choice = st.radio("Add to list:", ["Library", "Wishlist"], horizontal=True)
-
-submit_button = entry_form.form_submit_button(label="Add Book")
-
-if submit_button:
-    if title and author:
-        new_book_data = pd.DataFrame([{
-            "Title": title,
-            "Author": author,
-            "ISBN": isbn,
-            "Date Read": date_read
-        }])
-        target_df = library_df if list_choice == "Library" else wishlist_df
-        updated_df = pd.concat([target_df, new_book_data], ignore_index=True)
-        conn.update(worksheet=list_choice, data=updated_df)
-        st.success(f"'{title}' added to your {list_choice}!")
-        st.cache_data.clear() # Clear cache to show new entry
-    else:
-        st.warning("Please enter a title and author.")
 
 # ---------- Barcode Scanner (Optional) ----------
 if zbar_decode:
