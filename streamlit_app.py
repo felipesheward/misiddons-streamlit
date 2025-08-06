@@ -14,6 +14,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
+import gspread
 from PIL import Image, ImageOps
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -47,12 +48,16 @@ WISHLIST_DB = DATA_DIR / "wishlist_database.csv"
 
 
 @st.cache_data(ttl=0)      # always get a fresh copy
-def load_sheet(tab: str) -> pd.DataFrame:
+def load_sheet(tab: str) -> pd.DataFrame | None:
     """
     Fetch the entire Google-Sheets *tab* and return it as a DataFrame.
     `tab` must match the worksheet name exactly (e.g., 'Library').
+    Returns None if the sheet is not found.
     """
-    return conn.read(worksheet=tab)
+    try:
+        return conn.read(worksheet=tab)
+    except gspread.exceptions.SpreadsheetNotFound:
+        return None
 
 
 
@@ -239,10 +244,11 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
 
 # ---------- Session state ----------
 if "library" not in st.session_state:
-    try:
-        st.session_state["library"] = load_sheet("Library")
+    library_df = load_sheet("Library")
+    if library_df is not None:
+        st.session_state["library"] = library_df
         st.session_state["gsheets_connected"] = True
-    except Exception:
+    else:
         st.error("Could not connect to Google Sheets. Using local CSV as a fallback.")
         st.session_state["gsheets_connected"] = False
         if BOOK_DB.exists():
@@ -251,9 +257,10 @@ if "library" not in st.session_state:
             st.session_state["library"] = pd.DataFrame(columns=["ISBN", "Title", "Author", "Genre", "Language", "Thumbnail", "Description", "Rating"])
 
 if "wishlist" not in st.session_state:
-    try:
-        st.session_state["wishlist"] = load_sheet("Wishlist")
-    except Exception:
+    wishlist_df = load_sheet("Wishlist")
+    if wishlist_df is not None:
+        st.session_state["wishlist"] = wishlist_df
+    else:
         if WISHLIST_DB.exists():
             st.session_state["wishlist"] = pd.read_csv(WISHLIST_DB)
         else:
