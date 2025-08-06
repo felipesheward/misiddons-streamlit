@@ -63,10 +63,16 @@ def sync_session(name: str) -> None:
     Push the DataFrame stored in st.session_state[name] to the worksheet
     whose title is `name.capitalize()` ('library' → 'Library').
     """
-    conn.update(
-        worksheet=name.capitalize(),
-        data=st.session_state[name]      # the DataFrame to write
-    )
+    if st.session_state.get("gsheets_connected"):
+        conn.update(
+            worksheet=name.capitalize(),
+            data=st.session_state[name]      # the DataFrame to write
+        )
+    else:
+        if name == "library":
+            st.session_state[name].to_csv(BOOK_DB, index=False)
+        elif name == "wishlist":
+            st.session_state[name].to_csv(WISHLIST_DB, index=False)
 
 
 # ---------- Barcode utilities ----------
@@ -233,12 +239,29 @@ def get_recommendations_by_author(author: str, max_results: int = 5) -> list[dic
 
 # ---------- Session state ----------
 if "library" not in st.session_state:
-    st.session_state["library"] = load_sheet("Library")
-if "wishlist" not in st.session_state:
-    st.session_state["wishlist"] = load_sheet("Wishlist")
+    try:
+        st.session_state["library"] = load_sheet("Library")
+        st.session_state["gsheets_connected"] = True
+    except Exception:
+        st.error("Could not connect to Google Sheets. Using local CSV as a fallback.")
+        st.session_state["gsheets_connected"] = False
+        if BOOK_DB.exists():
+            st.session_state["library"] = pd.read_csv(BOOK_DB)
+        else:
+            st.session_state["library"] = pd.DataFrame(columns=["ISBN", "Title", "Author", "Genre", "Language", "Thumbnail", "Description", "Rating"])
 
-library_df = st.session_state["library"]      
-wishlist_df = st.session_state["wishlist"]       
+if "wishlist" not in st.session_state:
+    try:
+        st.session_state["wishlist"] = load_sheet("Wishlist")
+    except Exception:
+        if WISHLIST_DB.exists():
+            st.session_state["wishlist"] = pd.read_csv(WISHLIST_DB)
+        else:
+            st.session_state["wishlist"] = pd.DataFrame(columns=["ISBN", "Title", "Author", "Genre", "Language", "Thumbnail", "Description", "Rating"])
+
+
+library_df = st.session_state["library"]
+wishlist_df = st.session_state["wishlist"]
 
 # ---------- UI ----------
 st.title("Misiddons Book Database")
