@@ -14,7 +14,7 @@ from urllib.parse import quote
 from PIL import Image
 
 # ---------- CONFIGURATION ----------
-GOOGLE_SHEET_NAME = "Misiddons Book Database"
+GOOGLE_SHEET_NAME = "database"
 
 # Path to your service account JSON file (ensure this file is in your app directory)
 BASE_DIR = Path(__file__).resolve().parent
