@@ -4,6 +4,7 @@
 Misiddons Book Database – Streamlit app
 """
 import os
+from pathlib import Path
 import pandas as pd
 import requests
 import streamlit as st
@@ -13,11 +14,11 @@ from urllib.parse import quote
 from PIL import Image
 
 # ---------- CONFIGURATION ----------
-# IMPORTANT: Set your Google Sheet name here
-GOOGLE_SHEET_NAME = "Misiddons Book Database"  # corrected spelling
+GOOGLE_SHEET_NAME = "Misiddons Book Database"
 
-# Path to your service account JSON file
-SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "misiddons-book-databse-2053f224ebd3.json")
+# Path to your service account JSON file (ensure this file is in your app directory)
+BASE_DIR = Path(__file__).resolve().parent
+SERVICE_ACCOUNT_FILE = BASE_DIR / "misiddons-book-databse-2053f224ebd3.json"
 
 # ---------- OPTIONAL barcode support ----------
 try:
@@ -47,8 +48,10 @@ def connect_to_gsheets():
                 st.secrets["gcp_service_account"], scopes=scopes
             )
         else:
+            if not SERVICE_ACCOUNT_FILE.exists():
+                raise FileNotFoundError(f"Service account file not found at {SERVICE_ACCOUNT_FILE}")
             creds = Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_FILE, scopes=scopes
+                str(SERVICE_ACCOUNT_FILE), scopes=scopes
             )
         return gspread.authorize(creds)
     except Exception as e:
@@ -66,7 +69,7 @@ def load_data(client: gspread.Client, worksheet_name: str) -> pd.DataFrame:
         df = pd.DataFrame(worksheet.get_all_records())
         return df.dropna(axis=0, how="all")
     except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"Spreadsheet '{GOOGLE_SHEET_NAME}' not found. Please check the name in the script and your sharing permissions.")
+        st.error(f"Spreadsheet '{GOOGLE_SHEET_NAME}' not found. Please check the name and sharing permissions.")
     except gspread.exceptions.WorksheetNotFound:
         st.error(f"Worksheet '{worksheet_name}' not found. Please create a tab with this exact name.")
     except Exception as e:
@@ -126,7 +129,7 @@ with st.form(key="entry_form"):
                 sheet_to_update = client.open(GOOGLE_SHEET_NAME).worksheet(list_choice)
                 sheet_to_update.append_row([title, author, isbn, date_read])
                 st.success(f"'{title}' added to your {list_choice}!")
-                st.cache_data.clear()  # Refresh data
+                st.cache_data.clear()
             except Exception as e:
                 st.error(f"Failed to add book: {e}")
         else:
