@@ -3,6 +3,7 @@
 """
 Misiddons Book Database – Streamlit app
 """
+import os
 import pandas as pd
 import requests
 import streamlit as st
@@ -13,7 +14,10 @@ from PIL import Image
 
 # ---------- CONFIGURATION ----------
 # IMPORTANT: Set your Google Sheet name here
-GOOGLE_SHEET_NAME = "Misiddons Book Databse" # Or whatever your sheet is named
+GOOGLE_SHEET_NAME = "Misiddons Book Database"  # corrected spelling
+
+# Path to your service account JSON file
+SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "misiddons-book-databse-2053f224ebd3.json")
 
 # ---------- OPTIONAL barcode support ----------
 try:
@@ -37,9 +41,15 @@ def connect_to_gsheets():
     """Establish and cache a connection to Google Sheets."""
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=scopes
-        )
+        # Use Streamlit secrets if available, otherwise load from JSON file
+        if "gcp_service_account" in st.secrets:
+            creds = Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"], scopes=scopes
+            )
+        else:
+            creds = Credentials.from_service_account_file(
+                SERVICE_ACCOUNT_FILE, scopes=scopes
+            )
         return gspread.authorize(creds)
     except Exception as e:
         st.error(f"Failed to connect to Google Sheets. Please check your credentials. Error: {e}")
@@ -65,23 +75,26 @@ def load_data(client: gspread.Client, worksheet_name: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=86400)
 def get_book_details(isbn: str) -> dict:
-    if not isbn or not isinstance(isbn, str) or len(isbn) < 10: return {}
+    if not isbn or not isinstance(isbn, str) or len(isbn) < 10:
+        return {}
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}")
     if r.status_code == 200:
         data = r.json()
-        if "items" in data: return data["items"][0]
+        if "items" in data:
+            return data["items"][0]
     return {}
 
 @st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list:
-    if not author: return []
+    if not author:
+        return []
     safe_author = quote(author)
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=inauthor:{safe_author}")
     if r.status_code == 200:
         data = r.json()
-        if "items" in data: return data["items"]
+        if "items" in data:
+            return data["items"]
     return []
-
 
 # ---------- Main App Logic ----------
 
@@ -111,15 +124,13 @@ with st.form(key="entry_form"):
         if title and author:
             try:
                 sheet_to_update = client.open(GOOGLE_SHEET_NAME).worksheet(list_choice)
-                # Append a row with the correct column order
                 sheet_to_update.append_row([title, author, isbn, date_read])
                 st.success(f"'{title}' added to your {list_choice}!")
-                st.cache_data.clear() # Refresh data
+                st.cache_data.clear()  # Refresh data
             except Exception as e:
                 st.error(f"Failed to add book: {e}")
         else:
             st.warning("Please enter at least a title and author.")
-
 
 # ---------- Barcode Scanner (Optional) ----------
 if zbar_decode:
@@ -179,9 +190,9 @@ with tab3:
                                 st.image(vol_info["imageLinks"]["thumbnail"])
                         with cols[1]:
                             st.subheader(vol_info.get("title", "No Title"))
-                            st.write(f"**Author(s):** {', '.join(vol_info.get('authors', ['N/A']))}")
-                            st.write(f"**Published:** {vol_info.get('publishedDate', 'N/A')}")
-                            st.caption(vol_info.get('description', 'No description available.'))
+                            st.write(f"**Author(s):** {', '.join(vol_info.get("authors", ['N/A']))}")
+                            st.write(f"**Published:** {vol_info.get("publishedDate", 'N/A')}")
+                            st.caption(vol_info.get("description", 'No description available.'))
                         st.markdown("---")
             else:
                 st.write(f"No recommendations found for {selected_author}.")
