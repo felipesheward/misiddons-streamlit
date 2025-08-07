@@ -14,7 +14,10 @@ from urllib.parse import quote
 from PIL import Image
 
 # ---------- CONFIGURATION ----------
-GOOGLE_SHEET_NAME = "database"
+# Option 1: Provide your Spreadsheet ID directly (from URL: /d/<THIS_ID>/)
+# Option 2: Provide the name of the sheet if you prefer lookup by name
+SPREADSHEET_ID = st.secrets.get("google_sheet_id", "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s")
+GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
 
 # Path to your service account JSON file (ensure this file is in your app directory)
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,52 +42,50 @@ st.markdown("""
 
 @st.cache_resource
 def connect_to_gsheets():
-    """Establish and cache a connection to Google Sheets."""
+    """Establish and cache a connection to Google Sheets via ID or name."""
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        # Use Streamlit secrets if available, otherwise load from JSON file
+        # Credentials: secrets or JSON file
         if "gcp_service_account" in st.secrets:
             creds = Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"], scopes=scopes
-            )
+                st.secrets["gcp_service_account"], scopes=scopes)
         else:
             if not SERVICE_ACCOUNT_FILE.exists():
                 raise FileNotFoundError(f"Service account file not found at {SERVICE_ACCOUNT_FILE}")
-            creds = Credentials.from_service_account_file(
-                str(SERVICE_ACCOUNT_FILE), scopes=scopes
-            )
-        return gspread.authorize(creds)
+            creds = Credentials.from_service_account_file(str(SERVICE_ACCOUNT_FILE), scopes=scopes)
+        client = gspread.authorize(creds)
+        return client
     except Exception as e:
-        st.error(f"Failed to connect to Google Sheets. Please check your credentials. Error: {e}")
+        st.error(f"Failed to connect to Google Sheets. Error: {e}")
         return None
 
 @st.cache_data(ttl=60)
 def load_data(client: gspread.Client, worksheet_name: str) -> pd.DataFrame:
-    """Safely fetch a worksheet and return it as a pandas DataFrame."""
+    """Fetch worksheet either by ID then sheet name or fallback to name-only."""
     if client is None:
         return pd.DataFrame()
     try:
-        spreadsheet = client.open(GOOGLE_SHEET_NAME)
+        # Try open by ID
+        if SPREADSHEET_ID and SPREADSHEET_ID != "":
+            spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        else:
+            spreadsheet = client.open(GOOGLE_SHEET_NAME)
         worksheet = spreadsheet.worksheet(worksheet_name)
-        df = pd.DataFrame(worksheet.get_all_records())
+        records = worksheet.get_all_records()
+        df = pd.DataFrame(records)
         return df.dropna(axis=0, how="all")
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"Spreadsheet '{GOOGLE_SHEET_NAME}' not found. Please check the name and sharing permissions.")
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Worksheet '{worksheet_name}' not found. Please create a tab with this exact name.")
     except Exception as e:
-        st.error(f"An error occurred while loading data from worksheet '{worksheet_name}': {e}")
-    return pd.DataFrame()
+        st.error(f"Could not load '{worksheet_name}': {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
 def get_book_details(isbn: str) -> dict:
-    if not isbn or not isinstance(isbn, str) or len(isbn) < 10:
+    if not isbn or len(isbn) < 10:
         return {}
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}")
-    if r.status_code == 200:
+    if r.ok:
         data = r.json()
-        if "items" in data:
-            return data["items"][0]
+        return data.get("items", [{}])[0]
     return {}
 
 @st.cache_data(ttl=86400)
@@ -93,111 +94,85 @@ def get_recommendations_by_author(author: str) -> list:
         return []
     safe_author = quote(author)
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=inauthor:{safe_author}")
-    if r.status_code == 200:
+    if r.ok:
         data = r.json()
-        if "items" in data:
-            return data["items"]
+        return data.get("items", [])
     return []
 
 # ---------- Main App Logic ----------
-
 client = connect_to_gsheets()
-
 library_df = load_data(client, "Library")
 wishlist_df = load_data(client, "Wishlist")
 
-if client and (library_df.empty and wishlist_df.empty):
-    st.warning("Could not load data from 'Library' or 'Wishlist'. Please check the error messages above and refresh the page.")
+if client and library_df.empty and wishlist_df.empty:
+    st.warning("No data loaded—check your sheet ID/name, permissions, and worksheet tabs.")
     st.stop()
 
-# ----- APP UI -----
-
 st.title("Misiddons Book Database")
-
+# --- Add New Book Form ---
 st.header("Add a new book")
-with st.form(key="entry_form"):
-    form_cols = st.columns([1, 1, 1, 1, 1])
-    title = form_cols[0].text_input("Title")
-    author = form_cols[1].text_input("Author")
-    isbn = form_cols[2].text_input("ISBN")
-    date_read = form_cols[3].text_input("Date Read")
-    list_choice = form_cols[4].radio("Add to list:", ["Library", "Wishlist"], horizontal=True)
-    
+with st.form("entry_form"):
+    cols = st.columns(5)
+    title = cols[0].text_input("Title")
+    author = cols[1].text_input("Author")
+    isbn = cols[2].text_input("ISBN")
+    date_read = cols[3].text_input("Date Read")
+    list_choice = cols[4].radio("Add to list:", ["Library", "Wishlist"], horizontal=True)
     if st.form_submit_button("Add Book"):
         if title and author:
             try:
-                sheet_to_update = client.open(GOOGLE_SHEET_NAME).worksheet(list_choice)
-                sheet_to_update.append_row([title, author, isbn, date_read])
-                st.success(f"'{title}' added to your {list_choice}!")
-                st.cache_data.clear()
+                sheet = (client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME))
+                ws = sheet.worksheet(list_choice)
+                ws.append_row([title, author, isbn, date_read])
+                st.success(f"Added '{title}' to your {list_choice}.")
+                st.experimental_rerun()
             except Exception as e:
                 st.error(f"Failed to add book: {e}")
         else:
-            st.warning("Please enter at least a title and author.")
+            st.warning("Please provide both title and author.")
 
-# ---------- Barcode Scanner (Optional) ----------
+# --- Barcode Scanner ---
 if zbar_decode:
     st.header("Scan Barcode")
-    uploaded_image = st.file_uploader("Upload an image with a barcode", type=["png", "jpg", "jpeg"])
-    if uploaded_image:
-        image = Image.open(uploaded_image)
-        barcodes = zbar_decode(image)
-        if barcodes:
-            for barcode in barcodes:
-                isbn_from_barcode = barcode.data.decode("utf-8")
-                st.info(f"Detected ISBN: {isbn_from_barcode}")
-                book_info = get_book_details(isbn_from_barcode)
-                if book_info:
-                    volume_info = book_info.get("volumeInfo", {})
-                    st.text_input("Title", value=volume_info.get("title", ""), key="barcode_title")
-                    st.text_input("Author", value=", ".join(volume_info.get("authors", [])), key="barcode_author")
-                    st.text_input("ISBN", value=isbn_from_barcode, key="barcode_isbn")
-                else:
-                    st.error("Could not find book details for this ISBN.")
+    img_file = st.file_uploader("Upload barcode image", type=["png", "jpg", "jpeg"])
+    if img_file:
+        img = Image.open(img_file)
+        codes = zbar_decode(img)
+        if codes:
+            for code in codes:
+                val = code.data.decode()
+                st.info(f"ISBN: {val}")
+                info = get_book_details(val)
+                vi = info.get("volumeInfo", {})
+                st.text_input("Title", vi.get("title", ""), key="btitle")
+                st.text_input("Author", ", ".join(vi.get("authors", [])), key="bauthor")
+                st.text_input("ISBN", val, key="bisbn")
         else:
-            st.warning("No barcode found in the uploaded image.")
+            st.warning("No barcode detected.")
 
 st.divider()
-
-# ---------- Display Data ----------
-tab1, tab2, tab3 = st.tabs(["Library", "Wishlist", "Recommendations"])
-
-with tab1:
+# --- Tabs ---
+tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
+with tabs[0]:
     st.header("My Library")
-    if not library_df.empty:
-        st.dataframe(library_df, use_container_width=True)
-    else:
-        st.info("Your library is empty. Add a book using the form above.")
-
-with tab2:
+    st.dataframe(library_df) if not library_df.empty else st.info("Library empty.")
+with tabs[1]:
     st.header("My Wishlist")
-    if not wishlist_df.empty:
-        st.dataframe(wishlist_df, use_container_width=True)
-    else:
-        st.info("Your wishlist is empty.")
-
-with tab3:
+    st.dataframe(wishlist_df) if not wishlist_df.empty else st.info("Wishlist empty.")
+with tabs[2]:
     st.header("Recommendations")
-    if not library_df.empty and "Author" in library_df.columns:
-        authors = library_df["Author"].dropna().unique()
-        selected_author = st.selectbox("Find books by authors you've read:", authors)
-        if selected_author:
-            recommendations = get_recommendations_by_author(selected_author)
-            if recommendations:
-                for item in recommendations:
-                    with st.container():
-                        vol_info = item.get("volumeInfo", {})
-                        cols = st.columns([1, 4])
-                        with cols[0]:
-                            if "imageLinks" in vol_info and "thumbnail" in vol_info["imageLinks"]:
-                                st.image(vol_info["imageLinks"]["thumbnail"])
-                        with cols[1]:
-                            st.subheader(vol_info.get("title", "No Title"))
-                            st.write(f"**Author(s):** {', '.join(vol_info.get("authors", ['N/A']))}")
-                            st.write(f"**Published:** {vol_info.get("publishedDate", 'N/A')}")
-                            st.caption(vol_info.get("description", 'No description available.'))
-                        st.markdown("---")
-            else:
-                st.write(f"No recommendations found for {selected_author}.")
+    if not library_df.empty and "Author" in library_df:
+        auths = library_df["Author"].dropna().unique()
+        sel = st.selectbox("Authors:", auths)
+        recs = get_recommendations_by_author(sel)
+        if recs:
+            for it in recs:
+                vi = it.get("volumeInfo", {})
+                st.subheader(vi.get("title", "No Title"))
+                st.write(f"**Authors:** {', '.join(vi.get('authors', []))}")
+                if img := vi.get("imageLinks", {}).get("thumbnail"): st.image(img)
+                st.markdown("---")
+        else:
+            st.info("No recommendations.")
     else:
-        st.info("Read some books to get recommendations!")
+        st.info("Read some books first.")
