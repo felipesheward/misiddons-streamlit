@@ -255,7 +255,7 @@ def get_openlibrary_rating(isbn: str):
 
 @st.cache_data(ttl=86400)
 def get_book_details_openlibrary(isbn: str) -> dict:
-    """Robust OpenLibrary metadata with description & cover fallbacks via works endpoint."""
+    """Robust OpenLibrary metadata with description & cover fallbacks via works/details endpoints."""
     try:
         r = requests.get(
             "https://openlibrary.org/api/books",
@@ -271,6 +271,24 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
+        # Extra fallback: jscmd=details may contain description
+        if not desc:
+            try:
+                rd = requests.get(
+                    "https://openlibrary.org/api/books",
+                    params={"bibkeys": f"ISBN:{isbn}", "jscmd": "details", "format": "json"},
+                    timeout=12,
+                    headers={"User-Agent": "misiddons/1.0"},
+                )
+                if rd.ok:
+                    details = (rd.json().get(f"ISBN:{isbn}") or {}).get("details", {})
+                    d2 = details.get("description")
+                    if isinstance(d2, dict):
+                        d2 = d2.get("value")
+                    if isinstance(d2, str) and d2:
+                        desc = d2
+            except Exception:
+                pass
         # Fallback: /isbn and then /works
         if not desc or not cover or not data.get("languages"):
             bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
@@ -372,29 +390,30 @@ def _extract_isbn_from_raw(raw: str) -> str:
 st.title("📚 Misiddons Book Database")
 
 # — Add Book Form —
-with st.form("entry_form"):
-    cols = st.columns(5)
-    title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
-    author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
-    isbn = cols[2].text_input("ISBN (Optional)", value=st.session_state.get("scan_isbn", ""))
-    date_read = cols[3].text_input("Date Read", placeholder="YYYY/MM/DD")
-    choice = cols[4].radio("Add to:", ["Library", "Wishlist"], horizontal=True)
+with st.expander("✍️ Add a New Book", expanded=False):
+    with st.form("entry_form"):
+        cols = st.columns(5)
+        title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
+        author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
+        isbn = cols[2].text_input("ISBN (Optional)", value=st.session_state.get("scan_isbn", ""))
+        date_read = cols[3].text_input("Date Read", placeholder="YYYY/MM/DD")
+        choice = cols[4].radio("Add to:", ["Library", "Wishlist"], horizontal=True)
 
-    if st.form_submit_button("Add Book"):
-        if title and author:
-            try:
-                scan_meta = st.session_state.get("last_scan_meta", {})
-                rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
-                for k in ["Genre","Language","Thumbnail","Description","Rating"]:
-                    if k in scan_meta and scan_meta[k] and k not in rec:
-                        rec[k] = scan_meta[k]
-                append_record(choice, rec)
-                st.success(f"Added '{title}' to {choice}.")
-                st.experimental_rerun()
-            except Exception as e:
-                st.error(f"Failed to add book: {e}")
-        else:
-            st.warning("Enter both title and author.")
+        if st.form_submit_button("Add Book"):
+            if title and author:
+                try:
+                    scan_meta = st.session_state.get("last_scan_meta", {})
+                    rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
+                    for k in ["Genre","Language","Thumbnail","Description","Rating"]:
+                        if k in scan_meta and scan_meta[k] and k not in rec:
+                            rec[k] = scan_meta[k]
+                    append_record(choice, rec)
+                    st.success(f"Added '{title}' to {choice}.")
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Failed to add book: {e}")
+            else:
+                st.warning("Enter both title and author.")
 
 # — Barcode scanner (from image) —
 if zbar_decode:
