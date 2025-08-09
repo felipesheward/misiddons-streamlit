@@ -50,7 +50,10 @@ def connect_to_gsheets():
     try:
         creds = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+            scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.readonly"
+        ]
         )
         return gspread.authorize(creds)
     except Exception as e:
@@ -64,8 +67,17 @@ def load_data(client: gspread.Client, worksheet: str) -> pd.DataFrame:
     try:
         ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
         # Strip accidental whitespace and try exact match
+        # Try exact, then forgiving match (strip+casefold)
         target = worksheet.strip()
-        ws = ss.worksheet(target)
+        try:
+            ws = ss.worksheet(target)
+        except WorksheetNotFound:
+            names = [w.title for w in ss.worksheets()]
+            norm = {n.strip().casefold(): n for n in names}
+            if target.strip().casefold() in norm:
+                ws = ss.worksheet(norm[target.strip().casefold()])
+            else:
+                raise
         df = pd.DataFrame(ws.get_all_records())
         return df.dropna(how="all")
     except WorksheetNotFound:
