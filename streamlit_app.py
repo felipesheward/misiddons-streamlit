@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Misiddons Book Database – Streamlit app (Scan-only mode)
-- Uses device camera to scan barcodes
-- Prefers back camera on mobile (Streamlit's camera widget usually selects it)
-- Fetches metadata (title, author, cover, description)
-- Lets you add directly to Library or Wishlist
+Misiddons Book Database – Streamlit app (Form + Scanner)
+- Add books manually via form
+- Scan barcodes from a photo to auto‑fill metadata (title, author, cover, description)
+- Add to Library or Wishlist
 """
-
 from __future__ import annotations
-import io
+
 import pandas as pd
 import requests
 import streamlit as st
@@ -27,12 +25,11 @@ except Exception:
 
 # ---------- CONFIG ----------
 # Secrets should contain your service account + (optionally) your sheet id/name
-# Fallbacks provided in case secrets are missing
 DEFAULT_SHEET_ID   = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
 SPREADSHEET_ID     = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
 GOOGLE_SHEET_NAME  = st.secrets.get("google_sheet_name", "database")
 
-st.set_page_config(page_title="Misiddons Book Database – Scanner", layout="wide")
+st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
 # ---------- Google Sheets helpers ----------
 @st.cache_resource
@@ -50,6 +47,56 @@ def connect_to_gsheets():
     except Exception as e:
         st.error(f"Failed to authorize Google Sheets: {e}")
         return None
+
+@st.cache_data(ttl=60)
+def load_data(worksheet: str) -> pd.DataFrame:
+    """Fetch a worksheet into a DataFrame. Avoid passing unhashable client into cache.
+    Falls back to get_all_values() if get_all_records() fails.
+    """
+    client_local = connect_to_gsheets()
+    if not client_local:
+        return pd.DataFrame()
+    ss = None
+    try:
+        ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
+        # Try exact, then forgiving match (strip+casefold)
+        target = worksheet.strip()
+        try:
+            ws = ss.worksheet(target)
+        except WorksheetNotFound:
+            names = [w.title for w in ss.worksheets()]
+            norm = {n.strip().casefold(): n for n in names}
+            if target.strip().casefold() in norm:
+                ws = ss.worksheet(norm[target.strip().casefold()])
+            else:
+                raise
+        try:
+            # Primary path
+            records = ws.get_all_records()
+            df = pd.DataFrame(records)
+            return df.dropna(how="all")
+        except Exception:
+            # Fallback path – raw values with first row as header
+            vals = ws.get_all_values()
+            if not vals:
+                return pd.DataFrame()
+            header, *rows = vals
+            df = pd.DataFrame(rows, columns=header)
+            return df.dropna(how="all")
+    except WorksheetNotFound:
+        try:
+            tabs = [w.title for w in ss.worksheets()] if ss else []
+        except Exception:
+            tabs = []
+        st.error(f"Worksheet '{worksheet}' not found. Available tabs: {tabs}")
+        return pd.DataFrame()
+    except APIError as e:
+        code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
+        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}). If 404/403, re‑share the sheet with the service account and verify the ID.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def _get_ws(tab: str):
@@ -74,7 +121,7 @@ def append_record(tab: str, record: dict) -> None:
         ws = _get_ws(tab)
         if not ws:
             raise RuntimeError("Worksheet not found")
-        headers = ws.row_values(1) or ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating"]
+        headers = ws.row_values(1) or ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","Date Read"]
         # keep ISBN as text
         if record.get("ISBN") and str(record["ISBN"]).isdigit():
             record["ISBN"] = "'" + str(record["ISBN"]).strip()
@@ -157,91 +204,180 @@ def get_book_metadata(isbn: str) -> dict:
     meta = get_book_details_google(isbn)
     return meta or get_book_details_openlibrary(isbn)
 
+@st.cache_data(ttl=86400)
+def get_recommendations_by_author(author: str) -> list:
+    if not author:
+        return []
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f"inauthor:{quote(author)}", "maxResults": 8},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        if r.ok:
+            return r.json().get("items", [])
+    except Exception:
+        pass
+    return []
+
 # ---------- Barcode helpers ----------
 def _extract_isbn_from_raw(raw: str) -> str:
-    # Keep only digits, then prefer last 13 digits (EAN-13); fall back to 10 if present
+    # Keep only digits, then prefer last 13 digits (EAN-13)
     digits = "".join(ch for ch in raw if ch.isdigit())
     if len(digits) >= 13:
         return digits[-13:]
     return digits
 
-def decode_isbn_from_image(img: Image.Image) -> str:
-    if not zbar_decode:
-        return ""
-    try:
-        # Ensure RGB for pyzbar
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        codes = zbar_decode(img)
-        if not codes:
-            return ""
-        raw = codes[0].data.decode(errors="ignore")
-        return _extract_isbn_from_raw(raw)
-    except Exception:
-        return ""
+# ---------- UI ----------
+st.title("📚 Misiddons Book Database")
 
-# ---------- UI (Scan-only) ----------
-st.title("📚 Misiddons – Scan & Add")
+# — Add Book Form —
+with st.form("entry_form"):
+    # Defaults come from a scan (if user clicked "Fill form above")
+    cols = st.columns(5)
+    title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
+    author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
+    isbn = cols[2].text_input("ISBN (Optional)", value=st.session_state.get("scan_isbn", ""))
+    date_read = cols[3].text_input("Date Read", placeholder="YYYY/MM/DD")
+    choice = cols[4].radio("Add to:", ["Library", "Wishlist"], horizontal=True)
 
-if not zbar_decode:
-    st.error("Barcode scanning requires `pyzbar` + the system library `zbar`. Install them or use manual ISBN entry.")
-else:
-    st.caption("Tip: On phones, the camera widget usually opens the **back camera**. If not, flip it in the camera UI.")
-    cam_img = st.camera_input("Point at the book's barcode and take a photo")
-
-    if cam_img is not None:
-        image = Image.open(cam_img)
-        isbn = decode_isbn_from_image(image)
-        if not isbn:
-            st.warning("Couldn't detect a barcode. Try getting closer and ensure good lighting.")
+    if st.form_submit_button("Add Book"):
+        if title and author:
+            try:
+                rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
+                append_record(choice, rec)
+                st.success(f"Added '{title}' to {choice}.")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Failed to add book: {e}")
         else:
-            st.success(f"Detected ISBN: {isbn}")
-            meta = get_book_metadata(isbn)
-            if not meta:
-                st.error("Couldn't fetch details from Google/OpenLibrary for this ISBN.")
-            else:
-                # Preview card
-                cols = st.columns([1, 2])
-                with cols[0]:
-                    if meta.get("Thumbnail"):
-                        st.image(meta["Thumbnail"], caption=meta.get("Title", ""))
-                with cols[1]:
-                    st.subheader(meta.get("Title", "Unknown Title"))
-                    st.write(f"**Author:** {meta.get('Author','Unknown')}")
-                    if meta.get("Genre"):
-                        st.write(f"**Genre:** {meta.get('Genre')}")
-                    if meta.get("Language"):
-                        st.write(f"**Language:** {meta.get('Language')}")
-                    if meta.get("Description"):
-                        desc = meta["Description"]
-                        st.caption(desc[:800] + ("…" if len(desc) > 800 else ""))
+            st.warning("Enter both title and author.")
 
-                # Actions
-                a1, a2 = st.columns(2)
-                with a1:
-                    if st.button("➕ Add to Library", use_container_width=True):
-                        try:
-                            append_record("Library", meta)
-                            st.success("Added to Library ✔")
-                        except Exception:
-                            pass
-                with a2:
-                    if st.button("🧾 Add to Wishlist", use_container_width=True):
-                        try:
-                            append_record("Wishlist", meta)
-                            st.success("Added to Wishlist ✔")
-                        except Exception:
-                            pass
+# — Barcode scanner (from image) —
+if zbar_decode:
+    with st.expander("📷 Scan Barcode from Photo"):
+        up = st.file_uploader("Upload a photo of the barcode", type=["png","jpg","jpeg"])
+        if up:
+            try:
+                img = Image.open(up)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                codes = zbar_decode(img)
+            except Exception:
+                codes = []
+            if not codes:
+                st.warning("No barcode found. Try a closer, sharper photo.")
+            else:
+                raw = codes[0].data.decode(errors="ignore")
+                isbn_bc = _extract_isbn_from_raw(raw)
+                st.info(f"Detected code: {raw} → Using ISBN: {isbn_bc}")
+
+                meta = get_book_metadata(isbn_bc)
+                if not meta:
+                    st.error("Couldn't fetch details from Google/OpenLibrary.")
+                else:
+                    # Preview card
+                    cols = st.columns([1,3])
+                    with cols[0]:
+                        if meta.get("Thumbnail"):
+                            st.image(meta["Thumbnail"], caption=meta.get("Title",""))
+                    with cols[1]:
+                        st.subheader(meta.get("Title","Unknown Title"))
+                        st.write(f"**Author:** {meta.get('Author','Unknown')}")
+                        if meta.get("Genre"):
+                            st.write(f"**Genre:** {meta.get('Genre')}")
+                        if meta.get("Language"):
+                            st.write(f"**Language:** {meta.get('Language')}")
+                        if meta.get("Description"):
+                            desc = meta["Description"]
+                            st.caption(desc[:800] + ("…" if len(desc) > 800 else ""))
+
+                    # Actions
+                    a1, a2, a3 = st.columns(3)
+                    with a1:
+                        if st.button("➕ Add to Library", key="add_scan_lib", use_container_width=True):
+                            try:
+                                append_record("Library", meta)
+                                st.success("Added to Library ✔")
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    with a2:
+                        if st.button("🧾 Add to Wishlist", key="add_scan_wl", use_container_width=True):
+                            try:
+                                append_record("Wishlist", meta)
+                                st.success("Added to Wishlist ✔")
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    with a3:
+                        if st.button("📝 Fill form above", key="fill_form_from_scan", use_container_width=True):
+                            st.session_state["scan_title"] = meta.get("Title", "")
+                            st.session_state["scan_author"] = meta.get("Author", "")
+                            st.session_state["scan_isbn"] = meta.get("ISBN", "")
+                            st.success("Filled the form fields with scanned data.")
+                            st.experimental_rerun()
+else:
+    st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable in the environment, paste the ISBN manually above.")
 
 st.divider()
 
-# ---- Diagnostics (optional) ----
-with st.expander("Diagnostics"):
-    acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
-    st.write("Service account:", acct)
-    st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
+# ---- Diagnostics (safe to show) ----
+with st.expander("Diagnostics – help me if it still fails"):
     try:
-        ws_titles = [w.title for w in (_get_ws("Library").spreadsheet.worksheets())]
-        st.write("Tabs:", ws_titles)
+        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
+        st.write("Service account email:", acct)
+        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
+        try:
+            test_client = connect_to_gsheets()
+            if test_client:
+                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
+                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
+        except Exception as e:
+            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
     except Exception as e:
-        st.write("Sheet access:", str(e))
+        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
+
+# ---- Tabs ----
+tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
+with tabs[0]:
+    st.header("My Library")
+    library_df = load_data("Library")
+    if not library_df.empty:
+        st.dataframe(library_df, use_container_width=True)
+    else:
+        st.info("Library is empty.")
+with tabs[1]:
+    st.header("My Wishlist")
+    wishlist_df = load_data("Wishlist")
+    if not wishlist_df.empty:
+        st.dataframe(wishlist_df, use_container_width=True)
+    else:
+        st.info("Wishlist is empty.")
+with tabs[2]:
+    st.header("Recommendations")
+    library_df = load_data("Library")
+    if not library_df.empty and "Author" in library_df.columns:
+        authors = library_df["Author"].dropna().unique()
+        selected_author = st.selectbox("Find books by authors you've read:", authors)
+        if selected_author:
+            recommendations = get_recommendations_by_author(selected_author)
+            if recommendations:
+                for item in recommendations:
+                    vi = item.get("volumeInfo", {})
+                    cols = st.columns([1, 4])
+                    with cols[0]:
+                        thumb = vi.get("imageLinks", {}).get("thumbnail")
+                        if thumb:
+                            st.image(thumb)
+                    with cols[1]:
+                        st.subheader(vi.get("title", "No Title"))
+                        st.write(f"**Author(s):** {', '.join(vi.get('authors', ['N/A']))}")
+                        st.write(f"**Published:** {vi.get('publishedDate', 'N/A')}")
+                        st.caption(vi.get("description", 'No description available.'))
+                        st.markdown("---")
+            else:
+                st.info("No recommendations found.")
+    else:
+        st.info("Read some books to get recommendations!")
