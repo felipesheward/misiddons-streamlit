@@ -113,8 +113,74 @@ def load_data(worksheet: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=86400)
 def get_book_details(isbn: str) -> dict:
-    if not isbn or len(isbn) < 10:
+    """Primary metadata fetcher (Google Books) with a consistent shape."""
+    if not isbn:
         return {}
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        if not items:
+            return {}
+        info = items[0].get("volumeInfo", {})
+        desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
+        thumbs = (info.get("imageLinks") or {})
+        thumb = thumbs.get("thumbnail") or thumbs.get("smallThumbnail")
+        cats = info.get("categories") or []
+        # Normalize to our sheet headers
+        return {
+            "ISBN": isbn,
+            "Title": info.get("title", ""),
+            "Author": ", ".join(info.get("authors", [])),
+            "Genre": ", ".join(cats) if cats else "",
+            "Language": (info.get("language") or "").upper(),
+            "Thumbnail": thumb or "",
+            "Description": desc or "",
+        }
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=86400)
+def get_book_details_fallback(isbn: str) -> dict:
+    """Fallback metadata via Open Library (best-effort)."""
+    try:
+        r = requests.get(
+            "https://openlibrary.org/api/books",
+            params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        r.raise_for_status()
+        data = r.json().get(f"ISBN:{isbn}")
+        if not data:
+            return {}
+        authors = ", ".join([a.get("name", "") for a in data.get("authors", []) if a])
+        subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
+        cover = (data.get("cover") or {}).get("medium") or (data.get("cover") or {}).get("large") or ""
+        return {
+            "ISBN": isbn,
+            "Title": data.get("title", ""),
+            "Author": authors,
+            "Genre": subjects,
+            "Language": (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper(),
+            "Thumbnail": cover,
+            "Description": data.get("notes", "") if isinstance(data.get("notes"), str) else "",
+        }
+    except Exception:
+        return {}
+
+def get_book_metadata(isbn: str) -> dict:
+    """Try Google first, then OpenLibrary. Returns normalized dict or {}."""
+    meta = get_book_details(isbn)
+    if meta:
+        return meta
+    return get_book_details_fallback(isbn)
+
     r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}")
     if r.ok:
         data = r.json()
@@ -142,18 +208,37 @@ st.title("Misiddons Book Database")
 
 # Add book form
 with st.form("entry_form"):
+    # Detect current headers so we append in the right order
+    current_headers = []
+    try:
+        ss_hdr = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
+        ws_hdr = ss_hdr.worksheet("Library")
+        current_headers = ws_hdr.row_values(1)
+    except Exception:
+        current_headers = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating"]
+
     cols = st.columns(5)
-    title = cols[0].text_input("Title")
-    author = cols[1].text_input("Author")
-    isbn = cols[2].text_input("ISBN")
-    date_read = cols[3].text_input("Date Read")
+    title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
+    author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
+    isbn = cols[2].text_input("ISBN (Optional)", value=st.session_state.get("scan_isbn", ""))
+    date_read = cols[3].text_input("Date Read", placeholder="YYYY/MM/DD")
     choice = cols[4].radio("Add to:", ["Library", "Wishlist"], horizontal=True)
+
+    def _append_record(target_ws, record: dict):
+        # Build a row matching current headers; unknown headers become empty
+        keymap = {h.lower(): h for h in current_headers}
+        # include Date Read if user keeps the older sheet
+        record = {**record, "Date Read": date_read}
+        row = [record.get(keymap.get(h.lower(), h), record.get(h, "")) for h in current_headers]
+        target_ws.append_row(row, value_input_option="USER_ENTERED")
+
     if st.form_submit_button("Add Book"):
         if title and author:
             try:
                 ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
                 ws = ss.worksheet(choice)
-                ws.append_row([title, author, isbn, date_read])
+                rec = {"ISBN": isbn, "Title": title, "Author": author}
+                _append_record(ws, rec)
                 st.success(f"Added '{title}' to {choice}.")
                 st.experimental_rerun()
             except Exception as e:
@@ -163,20 +248,63 @@ with st.form("entry_form"):
 
 # Barcode scanner
 if zbar_decode:
-    st.header("Scan Barcode")
-    up = st.file_uploader("Upload image", type=["png","jpg","jpeg"])
-    if up:
-        img = Image.open(up)
-        codes = zbar_decode(img)
-        if codes:
-            isbn_bc = codes[0].data.decode()
-            st.info(f"ISBN: {isbn_bc}")
-            info = get_book_details(isbn_bc).get("volumeInfo", {})
-            st.text_input("Title", info.get("title",""), key="btitle")
-            st.text_input("Author", ", ".join(info.get("authors",[])), key="bauthor")
-            st.text_input("ISBN", isbn_bc, key="bisbn")
-        else:
-            st.warning("No barcode found.")
+    with st.expander("📷 Scan Barcode"):
+        up = st.file_uploader("Upload an image with a barcode", type=["png","jpg","jpeg"])
+        if up:
+            img = Image.open(up)
+            codes = zbar_decode(img)
+            if not codes:
+                st.warning("No barcode found.")
+            else:
+                raw = codes[0].data.decode(errors="ignore")
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                # Heuristic: many book EANs are 13 digits starting with 978/979
+                isbn_bc = digits[-13:] if len(digits) >= 13 else digits
+                st.info(f"Detected code: {raw} → Using ISBN: {isbn_bc}")
+
+                meta = get_book_metadata(isbn_bc)
+                if not meta:
+                    st.error("Couldn't fetch book details from Google/OpenLibrary.")
+                else:
+                    # Preview card
+                    cols = st.columns([1,3])
+                    with cols[0]:
+                        if meta.get("Thumbnail"):
+                            st.image(meta["Thumbnail"], caption=meta.get("Title",""))
+                    with cols[1]:
+                        st.subheader(meta.get("Title","Unknown Title"))
+                        st.write(f"**Author:** {meta.get('Author','Unknown')}")
+                        if meta.get("Genre"):
+                            st.write(f"**Genre:** {meta.get('Genre')}")
+                        if meta.get("Language"):
+                            st.write(f"**Language:** {meta.get('Language')}")
+                        if meta.get("Description"):
+                            st.caption(meta["Description"][:600] + ("…" if len(meta["Description"])>600 else ""))
+
+                    # Add buttons
+                    add_cols = st.columns([1,1])
+                    with add_cols[0]:
+                        if st.button("➕ Add to Library", key="add_scan_lib"):
+                            try:
+                                ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
+                                ws = ss.worksheet("Library")
+                                headers = ws.row_values(1)
+                                keymap = {h.lower(): h for h in headers}
+                                row = [meta.get(keymap.get(h.lower(), h), meta.get(h, "")) for h in headers]
+                                ws.append_row(row, value_input_option="USER_ENTERED")
+                                st.success("Book added to Library.")
+                                st.cache_data.clear()
+                            except Exception as e:
+                                st.error(f"Failed to add to Library: {e}")
+                    with add_cols[1]:
+                        if st.button("📝 Fill form above", key="fill_form_from_scan"):
+                            st.session_state["scan_title"] = meta.get("Title", "")
+                            st.session_state["scan_author"] = meta.get("Author", "")
+                            st.session_state["scan_isbn"] = meta.get("ISBN", "")
+                            st.success("Filled the form fields with scanned data.")
+                            st.experimental_rerun()
+else:
+    st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable in the environment, you can paste the ISBN manually above.")
 
 st.divider()
 
