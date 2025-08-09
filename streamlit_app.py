@@ -115,20 +115,69 @@ def _get_ws(tab: str):
             return ss.worksheet(norm[t.casefold()])
         raise
 
-# Preserve ISBN as text and append using current header order
+# Preserve ISBN as text, ensure headers, de-duplicate, then append
+REQUIRED_HEADERS = [
+    "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","Date Read"
+]
+
+def _normalize_isbn(s: str) -> str:
+    if not s:
+        return ""
+    return "".join(ch for ch in str(s).replace("'","") if ch.isdigit())
+
 def append_record(tab: str, record: dict) -> None:
     try:
         ws = _get_ws(tab)
         if not ws:
             raise RuntimeError("Worksheet not found")
-        headers = ws.row_values(1) or ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","Date Read"]
-        # keep ISBN as text
+        # 1) Ensure headers contain required fields (adds missing at the end)
+        headers = ws.row_values(1)
+        if not headers:
+            headers = REQUIRED_HEADERS.copy()
+            ws.update('A1', [headers])
+        else:
+            missing = [h for h in REQUIRED_HEADERS if h not in headers]
+            if missing:
+                headers = headers + missing
+                ws.update('A1', [headers])
+        # 2) De-dup: by ISBN or Title+Author
+        values = ws.get_all_values()
+        existing_isbns = set()
+        existing_ta = set()
+        try:
+            i_isbn   = headers.index("ISBN")
+        except ValueError:
+            i_isbn = None
+        try:
+            i_title  = headers.index("Title")
+            i_author = headers.index("Author")
+        except ValueError:
+            i_title = i_author = None
+        for r in values[1:]:  # skip header
+            if i_isbn is not None and len(r) > i_isbn:
+                norm = _normalize_isbn(r[i_isbn])
+                if norm:
+                    existing_isbns.add(norm)
+            if i_title is not None and i_author is not None and len(r) > max(i_title, i_author):
+                t = (r[i_title] or "").strip().lower()
+                a = (r[i_author] or "").strip().lower()
+                if t or a:
+                    existing_ta.add((t, a))
+        inc_isbn_norm = _normalize_isbn(record.get("ISBN", ""))
+        inc_ta = ((record.get("Title", "").strip().lower()), (record.get("Author", "").strip().lower()))
+        if inc_isbn_norm and inc_isbn_norm in existing_isbns:
+            st.info(f"'{record.get('Title','(unknown)')}' is already in {tab} (same ISBN). Skipped.")
+            return
+        if inc_ta in existing_ta:
+            st.info(f"'{record.get('Title','(unknown)')}' by {record.get('Author','?')} is already in {tab}. Skipped.")
+            return
+        # 3) Keep ISBN as text (avoid 9.78E+12) and append in header order
         if record.get("ISBN") and str(record["ISBN"]).isdigit():
             record["ISBN"] = "'" + str(record["ISBN"]).strip()
         keymap = {h.lower(): h for h in headers}
         row = [record.get(keymap.get(h.lower(), h), record.get(h, "")) for h in headers]
         ws.append_row(row, value_input_option="RAW")
-        st.cache_data.clear()  # refresh caches
+        st.cache_data.clear()
     except Exception as e:
         st.error(f"Failed to write to '{tab}': {e}")
         raise
