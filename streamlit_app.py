@@ -5,6 +5,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
 - Scan barcodes from a photo to auto‑fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
+- Prevents duplicates (by ISBN or Title+Author)
 """
 from __future__ import annotations
 
@@ -24,10 +25,10 @@ except Exception:
     zbar_decode = None
 
 # ---------- CONFIG ----------
-# Secrets should contain your service account + (optionally) your sheet id/name
-DEFAULT_SHEET_ID   = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
-SPREADSHEET_ID     = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
-GOOGLE_SHEET_NAME  = st.secrets.get("google_sheet_name", "database")
+DEFAULT_SHEET_ID  = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
+SPREADSHEET_ID    = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
+GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
+GOOGLE_BOOKS_KEY  = st.secrets.get("google_books_api_key", None)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
@@ -50,16 +51,13 @@ def connect_to_gsheets():
 
 @st.cache_data(ttl=60)
 def load_data(worksheet: str) -> pd.DataFrame:
-    """Fetch a worksheet into a DataFrame. Avoid passing unhashable client into cache.
-    Falls back to get_all_values() if get_all_records() fails.
-    """
+    """Fetch a worksheet into a DataFrame. Falls back to get_all_values()."""
     client_local = connect_to_gsheets()
     if not client_local:
         return pd.DataFrame()
     ss = None
     try:
         ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
-        # Try exact, then forgiving match (strip+casefold)
         target = worksheet.strip()
         try:
             ws = ss.worksheet(target)
@@ -71,18 +69,14 @@ def load_data(worksheet: str) -> pd.DataFrame:
             else:
                 raise
         try:
-            # Primary path
-            records = ws.get_all_records()
-            df = pd.DataFrame(records)
+            df = pd.DataFrame(ws.get_all_records())
             return df.dropna(how="all")
         except Exception:
-            # Fallback path – raw values with first row as header
             vals = ws.get_all_values()
             if not vals:
                 return pd.DataFrame()
             header, *rows = vals
-            df = pd.DataFrame(rows, columns=header)
-            return df.dropna(how="all")
+            return pd.DataFrame(rows, columns=header).dropna(how="all")
     except WorksheetNotFound:
         try:
             tabs = [w.title for w in ss.worksheets()] if ss else []
@@ -104,7 +98,6 @@ def _get_ws(tab: str):
     if not client:
         return None
     ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
-    # Try exact then forgiving match
     t = tab.strip()
     try:
         return ss.worksheet(t)
@@ -115,45 +108,55 @@ def _get_ws(tab: str):
             return ss.worksheet(norm[t.casefold()])
         raise
 
-# Preserve ISBN as text, ensure headers, de-duplicate, then append
-REQUIRED_HEADERS = [
+# ---------- Sheet write helpers ----------
+EXACT_HEADERS = [
     "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","Date Read"
 ]
+
+ISO_LANG = {
+    "EN":"English","IT":"Italian","ES":"Spanish","DE":"German","FR":"French",
+    "PT":"Portuguese","NL":"Dutch","SV":"Swedish","NO":"Norwegian","DA":"Danish",
+    "FI":"Finnish","RU":"Russian","PL":"Polish","TR":"Turkish","ZH":"Chinese",
+    "JA":"Japanese","KO":"Korean","AR":"Arabic","HE":"Hebrew","HI":"Hindi"
+}
+
+def normalize_language(s: str) -> str:
+    if not s:
+        return ""
+    s = str(s).strip()
+    if len(s) <= 3:
+        return ISO_LANG.get(s.upper(), s.upper())
+    return s
+
 
 def _normalize_isbn(s: str) -> str:
     if not s:
         return ""
-    return "".join(ch for ch in str(s).replace("'","") if ch.isdigit())
+    return "".join(ch for ch in str(s).replace("'", "") if ch.isdigit())
+
 
 def append_record(tab: str, record: dict) -> None:
+    """Ensure headers, dedupe (ISBN or Title+Author), preserve ISBN as text, then append."""
     try:
         ws = _get_ws(tab)
         if not ws:
             raise RuntimeError("Worksheet not found")
-        # 1) Ensure headers contain required fields (adds missing at the end)
+        # 1) Ensure headers in a fixed order (keep any extras at the end)
         headers = [h.strip() for h in ws.row_values(1)]
         if not headers:
-            headers = REQUIRED_HEADERS.copy()
+            headers = EXACT_HEADERS[:]
             ws.update('A1', [headers])
         else:
-            missing = [h for h in REQUIRED_HEADERS if h not in headers]
-            if missing:
-                headers = headers + missing
-                ws.update('A1', [headers])
-        # 2) De-dup: by ISBN or Title+Author
+            extras = [h for h in headers if h not in EXACT_HEADERS]
+            headers = EXACT_HEADERS[:] + extras
+            ws.update('A1', [headers])
+        # 2) De-dup in this tab
         values = ws.get_all_values()
-        existing_isbns = set()
-        existing_ta = set()
-        try:
-            i_isbn   = headers.index("ISBN")
-        except ValueError:
-            i_isbn = None
-        try:
-            i_title  = headers.index("Title")
-            i_author = headers.index("Author")
-        except ValueError:
-            i_title = i_author = None
-        for r in values[1:]:  # skip header
+        existing_isbns, existing_ta = set(), set()
+        i_isbn   = headers.index("ISBN") if "ISBN" in headers else None
+        i_title  = headers.index("Title") if "Title" in headers else None
+        i_author = headers.index("Author") if "Author" in headers else None
+        for r in values[1:]:
             if i_isbn is not None and len(r) > i_isbn:
                 norm = _normalize_isbn(r[i_isbn])
                 if norm:
@@ -171,7 +174,7 @@ def append_record(tab: str, record: dict) -> None:
         if inc_ta in existing_ta:
             st.info(f"'{record.get('Title','(unknown)')}' by {record.get('Author','?')} is already in {tab}. Skipped.")
             return
-        # 3) Keep ISBN as text (avoid 9.78E+12) and append in header order
+        # 3) Preserve ISBN as text, build row in header order, append
         if record.get("ISBN") and str(record["ISBN"]).isdigit():
             record["ISBN"] = "'" + str(record["ISBN"]).strip()
         keymap = {h.lower(): h for h in headers}
@@ -188,9 +191,12 @@ def get_book_details_google(isbn: str) -> dict:
     if not isbn:
         return {}
     try:
+        params = {"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1}
+        if GOOGLE_BOOKS_KEY:
+            params["key"] = GOOGLE_BOOKS_KEY
         r = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
-            params={"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1},
+            params=params,
             timeout=12,
             headers={"User-Agent": "misiddons/1.0"},
         )
@@ -213,6 +219,7 @@ def get_book_details_google(isbn: str) -> dict:
             "Language": (info.get("language") or "").upper(),
             "Thumbnail": thumb,
             "Description": (desc or "").strip(),
+            "Rating": str(info.get("averageRating", "")),
         }
     except Exception:
         return {}
@@ -231,7 +238,6 @@ def _ol_fetch_json(url: str) -> dict:
 def get_book_details_openlibrary(isbn: str) -> dict:
     """Robust OpenLibrary metadata with description & cover fallbacks via works endpoint."""
     try:
-        # Primary: jscmd=data (convenient fields, often has covers but not always full description)
         r = requests.get(
             "https://openlibrary.org/api/books",
             params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
@@ -243,36 +249,33 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         authors = ", ".join([a.get("name", "") for a in data.get("authors", []) if a])
         subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
         cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
-        # Description can live under "description" (str or {value}) or be missing
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
-        # If still missing, try /isbn/{isbn}.json -> works[0] -> /works/{id}.json
-        if not desc:
-            book_json = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
-            # Covers via numeric IDs
-            if not cover and book_json.get("covers"):
+        # Fallback: /isbn and then /works
+        if not desc or not cover or not data.get("languages"):
+            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+            if (not cover) and bj.get("covers"):
                 try:
-                    cover_id = book_json["covers"][0]
+                    cover_id = bj["covers"][0]
                     cover = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
                 except Exception:
                     pass
-            works = book_json.get("works") or []
+            works = bj.get("works") or []
             if works:
-                work_key = works[0].get("key")  # e.g., "/works/OL12345W"
-                if work_key:
-                    work_json = _ol_fetch_json(f"https://openlibrary.org{work_key}.json")
-                    d = work_json.get("description", "")
+                wk = works[0].get("key")
+                if wk:
+                    wj = _ol_fetch_json(f"https://openlibrary.org{wk}.json")
+                    d = wj.get("description", "")
                     if isinstance(d, dict):
                         d = d.get("value", "")
-                    if d:
+                    if d and not desc:
                         desc = d
-        # Language fallback
+        # Language
         lang = ""
         try:
             lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
         except Exception:
-            # try /isbn json
             bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
             try:
                 lang_codes = bj.get("languages", [])
@@ -280,7 +283,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
                     lang = lang_codes[0].get("key", "").split("/")[-1].upper()
             except Exception:
                 lang = ""
-        result = {
+        return {
             "ISBN": isbn,
             "Title": data.get("title", ""),
             "Author": authors,
@@ -289,79 +292,27 @@ def get_book_details_openlibrary(isbn: str) -> dict:
             "Thumbnail": cover,
             "Description": (desc or "").strip(),
         }
-        # If still no title but /isbn has title, use it
-        if not result["Title"]:
-            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
-            if bj.get("title"):
-                result["Title"] = bj["title"]
-        return result
-    except Exception:
-        return {}
-    try:
-        r = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params={"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1},
-            timeout=12,
-            headers={"User-Agent": "misiddons/1.0"},
-        )
-        r.raise_for_status()
-        items = r.json().get("items", [])
-        if not items:
-            return {}
-        info = items[0].get("volumeInfo", {})
-        desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
-        thumbs = info.get("imageLinks") or {}
-        thumb = thumbs.get("thumbnail") or thumbs.get("smallThumbnail") or ""
-        cats = info.get("categories") or []
-        return {
-            "ISBN": isbn,
-            "Title": info.get("title", ""),
-            "Author": ", ".join(info.get("authors", [])),
-            "Genre": ", ".join(cats) if cats else "",
-            "Language": (info.get("language") or "").upper(),
-            "Thumbnail": thumb,
-            "Description": desc or "",
-        }
     except Exception:
         return {}
 
-@st.cache_data(ttl=86400)
-def get_book_details_openlibrary(isbn: str) -> dict:
-    try:
-        r = requests.get(
-            "https://openlibrary.org/api/books",
-            params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
-            timeout=12,
-            headers={"User-Agent": "misiddons/1.0"},
-        )
-        r.raise_for_status()
-        data = r.json().get(f"ISBN:{isbn}")
-        if not data:
-            return {}
-        authors = ", ".join([a.get("name", "") for a in data.get("authors", []) if a])
-        subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
-        cover = (data.get("cover") or {}).get("medium") or (data.get("cover") or {}).get("large") or ""
-        lang = ""
-        if data.get("languages"):
-            try:
-                lang = data["languages"][0]["key"].split("/")[-1].upper()
-            except Exception:
-                lang = ""
-        return {
-            "ISBN": isbn,
-            "Title": data.get("title", ""),
-            "Author": authors,
-            "Genre": subjects,
-            "Language": lang,
-            "Thumbnail": cover,
-            "Description": data.get("notes", "") if isinstance(data.get("notes"), str) else "",
-        }
-    except Exception:
-        return {}
 
 def get_book_metadata(isbn: str) -> dict:
-    meta = get_book_details_google(isbn)
-    return meta or get_book_details_openlibrary(isbn)
+    """Merge Google + OpenLibrary so missing fields are filled."""
+    g = get_book_details_google(isbn)
+    need_keys = ["Description", "Thumbnail", "Language", "Genre", "Title", "Author"]
+    o = {}
+    if not g or any(not g.get(k) for k in need_keys):
+        o = get_book_details_openlibrary(isbn)
+    if not g and not o:
+        return {}
+    merged = {**o, **g}  # prefer Google when present
+    for k in need_keys:
+        if not merged.get(k) and (o.get(k)):
+            merged[k] = o[k]
+    merged["Language"] = normalize_language(merged.get("Language", "")) or ("English" if "english literature" in merged.get("Genre", "").lower() else "")
+    for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating"]:
+        merged.setdefault(k, "")
+    return merged
 
 @st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list:
@@ -382,7 +333,6 @@ def get_recommendations_by_author(author: str) -> list:
 
 # ---------- Barcode helpers ----------
 def _extract_isbn_from_raw(raw: str) -> str:
-    # Keep only digits, then prefer last 13 digits (EAN-13)
     digits = "".join(ch for ch in raw if ch.isdigit())
     if len(digits) >= 13:
         return digits[-13:]
@@ -393,7 +343,6 @@ st.title("📚 Misiddons Book Database")
 
 # — Add Book Form —
 with st.form("entry_form"):
-    # Defaults come from a scan (if user clicked "Fill form above")
     cols = st.columns(5)
     title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
     author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
@@ -404,10 +353,8 @@ with st.form("entry_form"):
     if st.form_submit_button("Add Book"):
         if title and author:
             try:
-                # Merge any metadata from last scan so Description/Thumbnail aren't lost
                 scan_meta = st.session_state.get("last_scan_meta", {})
                 rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
-                # Keep only known headers from scan_meta
                 for k in ["Genre","Language","Thumbnail","Description","Rating"]:
                     if k in scan_meta and scan_meta[k] and k not in rec:
                         rec[k] = scan_meta[k]
@@ -442,7 +389,6 @@ if zbar_decode:
                 if not meta:
                     st.error("Couldn't fetch details from Google/OpenLibrary.")
                 else:
-                    # Preview card
                     cols = st.columns([1,3])
                     with cols[0]:
                         if meta.get("Thumbnail"):
@@ -458,7 +404,6 @@ if zbar_decode:
                             desc = meta["Description"]
                             st.caption(desc[:800] + ("…" if len(desc) > 800 else ""))
 
-                    # Actions
                     a1, a2, a3 = st.columns(3)
                     with a1:
                         if st.button("➕ Add to Library", key="add_scan_lib", use_container_width=True):
