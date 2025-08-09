@@ -202,6 +202,116 @@ def get_book_details_google(isbn: str) -> dict:
         desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
         thumbs = info.get("imageLinks") or {}
         thumb = thumbs.get("thumbnail") or thumbs.get("smallThumbnail") or ""
+        if thumb.startswith("http://"):
+            thumb = thumb.replace("http://", "https://")
+        cats = info.get("categories") or []
+        return {
+            "ISBN": isbn,
+            "Title": info.get("title", ""),
+            "Author": ", ".join(info.get("authors", [])),
+            "Genre": ", ".join(cats) if cats else "",
+            "Language": (info.get("language") or "").upper(),
+            "Thumbnail": thumb,
+            "Description": (desc or "").strip(),
+        }
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=86400)
+def _ol_fetch_json(url: str) -> dict:
+    try:
+        r = requests.get(url, timeout=12, headers={"User-Agent": "misiddons/1.0"})
+        if r.ok:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(ttl=86400)
+def get_book_details_openlibrary(isbn: str) -> dict:
+    """Robust OpenLibrary metadata with description & cover fallbacks via works endpoint."""
+    try:
+        # Primary: jscmd=data (convenient fields, often has covers but not always full description)
+        r = requests.get(
+            "https://openlibrary.org/api/books",
+            params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        r.raise_for_status()
+        data = r.json().get(f"ISBN:{isbn}") or {}
+        authors = ", ".join([a.get("name", "") for a in data.get("authors", []) if a])
+        subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
+        cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
+        # Description can live under "description" (str or {value}) or be missing
+        desc = data.get("description", "")
+        if isinstance(desc, dict):
+            desc = desc.get("value", "")
+        # If still missing, try /isbn/{isbn}.json -> works[0] -> /works/{id}.json
+        if not desc:
+            book_json = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+            # Covers via numeric IDs
+            if not cover and book_json.get("covers"):
+                try:
+                    cover_id = book_json["covers"][0]
+                    cover = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
+                except Exception:
+                    pass
+            works = book_json.get("works") or []
+            if works:
+                work_key = works[0].get("key")  # e.g., "/works/OL12345W"
+                if work_key:
+                    work_json = _ol_fetch_json(f"https://openlibrary.org{work_key}.json")
+                    d = work_json.get("description", "")
+                    if isinstance(d, dict):
+                        d = d.get("value", "")
+                    if d:
+                        desc = d
+        # Language fallback
+        lang = ""
+        try:
+            lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
+        except Exception:
+            # try /isbn json
+            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+            try:
+                lang_codes = bj.get("languages", [])
+                if lang_codes:
+                    lang = lang_codes[0].get("key", "").split("/")[-1].upper()
+            except Exception:
+                lang = ""
+        result = {
+            "ISBN": isbn,
+            "Title": data.get("title", ""),
+            "Author": authors,
+            "Genre": subjects,
+            "Language": lang,
+            "Thumbnail": cover,
+            "Description": (desc or "").strip(),
+        }
+        # If still no title but /isbn has title, use it
+        if not result["Title"]:
+            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+            if bj.get("title"):
+                result["Title"] = bj["title"]
+        return result
+    except Exception:
+        return {}
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1},
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        if not items:
+            return {}
+        info = items[0].get("volumeInfo", {})
+        desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
+        thumbs = info.get("imageLinks") or {}
+        thumb = thumbs.get("thumbnail") or thumbs.get("smallThumbnail") or ""
         cats = info.get("categories") or []
         return {
             "ISBN": isbn,
@@ -294,7 +404,13 @@ with st.form("entry_form"):
     if st.form_submit_button("Add Book"):
         if title and author:
             try:
+                # Merge any metadata from last scan so Description/Thumbnail aren't lost
+                scan_meta = st.session_state.get("last_scan_meta", {})
                 rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
+                # Keep only known headers from scan_meta
+                for k in ["Genre","Language","Thumbnail","Description","Rating"]:
+                    if k in scan_meta and scan_meta[k] and k not in rec:
+                        rec[k] = scan_meta[k]
                 append_record(choice, rec)
                 st.success(f"Added '{title}' to {choice}.")
                 st.experimental_rerun()
@@ -365,6 +481,7 @@ if zbar_decode:
                             st.session_state["scan_title"] = meta.get("Title", "")
                             st.session_state["scan_author"] = meta.get("Author", "")
                             st.session_state["scan_isbn"] = meta.get("ISBN", "")
+                            st.session_state["last_scan_meta"] = meta
                             st.success("Filled the form fields with scanned data.")
                             st.experimental_rerun()
 else:
