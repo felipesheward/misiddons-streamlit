@@ -61,12 +61,13 @@ def connect_to_gsheets():
         return None
 
 @st.cache_data(ttl=60)
-def load_data(client: gspread.Client, worksheet: str) -> pd.DataFrame:
-    if not client:
+def load_data(worksheet: str) -> pd.DataFrame:
+    """Fetch a worksheet into a DataFrame. Avoid passing unhashable client into cache."""
+    client_local = connect_to_gsheets()
+    if not client_local:
         return pd.DataFrame()
     try:
-        ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
-        # Strip accidental whitespace and try exact match
+        ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
         # Try exact, then forgiving match (strip+casefold)
         target = worksheet.strip()
         try:
@@ -84,10 +85,9 @@ def load_data(client: gspread.Client, worksheet: str) -> pd.DataFrame:
         st.error(f"Worksheet '{worksheet}' not found. Available tabs: {[w.title for w in ss.worksheets()]} ")
         return pd.DataFrame()
     except APIError as e:
-        # 404 usually means the service account lacks access or the Sheet ID is wrong
         code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
         if code == 404:
-            st.error("Google Sheets API returned 404. This usually means the spreadsheet ID is wrong **or** the sheet is not shared with the service account email.")
+            st.error("Google Sheets API returned 404. Check the spreadsheet sharing/ID.")
         else:
             st.error(f"Google Sheets API error ({code}). {e}")
         return pd.DataFrame()
@@ -116,8 +116,8 @@ def get_recommendations_by_author(author: str) -> list:
 
 # Main
 client = connect_to_gsheets()
-library_df = load_data(client, "Library")
-wishlist_df = load_data(client, "Wishlist")
+library_df = load_data("Library")
+wishlist_df = load_data("Wishlist")
 
 if client and library_df.empty and wishlist_df.empty:
     st.warning("No data loaded. Check your sheet ID/name and permissions.")
