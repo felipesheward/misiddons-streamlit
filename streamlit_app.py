@@ -62,10 +62,13 @@ def connect_to_gsheets():
 
 @st.cache_data(ttl=60)
 def load_data(worksheet: str) -> pd.DataFrame:
-    """Fetch a worksheet into a DataFrame. Avoid passing unhashable client into cache."""
+    """Fetch a worksheet into a DataFrame. Avoid passing unhashable client into cache.
+    Falls back to get_all_values() if get_all_records() fails.
+    """
     client_local = connect_to_gsheets()
     if not client_local:
         return pd.DataFrame()
+    ss = None
     try:
         ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
         # Try exact, then forgiving match (strip+casefold)
@@ -79,20 +82,32 @@ def load_data(worksheet: str) -> pd.DataFrame:
                 ws = ss.worksheet(norm[target.strip().casefold()])
             else:
                 raise
-        df = pd.DataFrame(ws.get_all_records())
-        return df.dropna(how="all")
+        try:
+            # Primary path
+            records = ws.get_all_records()
+            df = pd.DataFrame(records)
+            return df.dropna(how="all")
+        except Exception as e1:
+            # Fallback path – raw values with first row as header
+            vals = ws.get_all_values()
+            if not vals:
+                return pd.DataFrame()
+            header, *rows = vals
+            df = pd.DataFrame(rows, columns=header)
+            return df.dropna(how="all")
     except WorksheetNotFound:
-        st.error(f"Worksheet '{worksheet}' not found. Available tabs: {[w.title for w in ss.worksheets()]} ")
+        try:
+            tabs = [w.title for w in ss.worksheets()] if ss else []
+        except Exception:
+            tabs = []
+        st.error(f"Worksheet '{worksheet}' not found. Available tabs: {tabs}")
         return pd.DataFrame()
     except APIError as e:
         code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
-        if code == 404:
-            st.error("Google Sheets API returned 404. Check the spreadsheet sharing/ID.")
-        else:
-            st.error(f"Google Sheets API error ({code}). {e}")
+        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}).")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Unexpected error loading '{worksheet}': {e}")
+        st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
@@ -119,9 +134,8 @@ client = connect_to_gsheets()
 library_df = load_data("Library")
 wishlist_df = load_data("Wishlist")
 
-if client and library_df.empty and wishlist_df.empty:
-    st.warning("No data loaded. Check your sheet ID/name and permissions.")
-    st.stop()
+if library_df.empty and wishlist_df.empty:
+    st.warning("No data loaded. Check your sheet ID/name, tab names, and sharing permissions.")
 
 st.title("Misiddons Book Database")
 
@@ -171,14 +185,15 @@ with st.expander("Diagnostics – help me if it still fails"):
         acct = st.secrets["gcp_service_account"].get("client_email", "(missing)") if "gcp_service_account" in st.secrets else "(no secrets found)"
         st.write("Service account email:", acct)
         st.write("Spreadsheet ID:", SPREADSHEET_ID or "(not set)")
-        if client:
-            try:
-                ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
+        try:
+            test_client = connect_to_gsheets()
+            if test_client:
+                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
                 st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
-            except Exception as e:
-                st.write("Open spreadsheet error:", str(e))
+        except Exception as e:
+            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
     except Exception as e:
-        st.write("Diagnostics error:", str(e))
+        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
 
 # Tabs
 tabs = st.tabs(["Library","Wishlist","Recommendations"])
