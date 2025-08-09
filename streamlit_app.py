@@ -387,7 +387,7 @@ def _extract_isbn_from_raw(raw: str) -> str:
     return digits
 
 # ---------- UI ----------
-st.title("📚 Misiddons Book Database")
+st.title("Misiddons Book Database")
 
 # — Add Book Form —
 with st.expander("✍️ Add a New Book", expanded=False):
@@ -477,21 +477,7 @@ else:
 
 st.divider()
 
-# ---- Diagnostics (safe to show) ----
-with st.expander("Diagnostics – help me if it still fails"):
-    try:
-        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
-        st.write("Service account email:", acct)
-        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
-        try:
-            test_client = connect_to_gsheets()
-            if test_client:
-                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
-                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
-        except Exception as e:
-            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
-    except Exception as e:
-        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
+
 
 # ---- Tabs ----
 tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
@@ -535,3 +521,20 @@ with tabs[2]:
                 st.info("No recommendations found.")
     else:
         st.info("Read some books to get recommendations!")
+
+
+# ---- Diagnostics (safe to show) ----
+with st.expander("Diagnostics – help me if it still fails"):
+    try:
+        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
+        st.write("Service account email:", acct)
+        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
+        try:
+            test_client = connect_to_gsheets()
+            if test_client:
+                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
+                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
+        except Exception as e:
+            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
+    except Exception as e:
+        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
