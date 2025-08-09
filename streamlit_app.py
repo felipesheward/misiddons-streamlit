@@ -131,7 +131,7 @@ def append_record(tab: str, record: dict) -> None:
         if not ws:
             raise RuntimeError("Worksheet not found")
         # 1) Ensure headers contain required fields (adds missing at the end)
-        headers = ws.row_values(1)
+        headers = [h.strip() for h in ws.row_values(1)]
         if not headers:
             headers = REQUIRED_HEADERS.copy()
             ws.update('A1', [headers])
