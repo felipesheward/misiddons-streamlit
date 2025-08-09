@@ -230,7 +230,10 @@ with st.form("entry_form"):
         # include Date Read if user keeps the older sheet
         record = {**record, "Date Read": date_read}
         row = [record.get(keymap.get(h.lower(), h), record.get(h, "")) for h in current_headers]
-        target_ws.append_row(row, value_input_option="USER_ENTERED")
+        # Keep ISBN as text
+        if record.get("ISBN") and str(record["ISBN"]).isdigit():
+            record["ISBN"] = "'" + str(record["ISBN"]).strip()
+        target_ws.append_row(row, value_input_option="RAW")
 
     if st.form_submit_button("Add Book"):
         if title and author:
@@ -290,10 +293,16 @@ if zbar_decode:
                                 ws = ss.worksheet("Library")
                                 headers = ws.row_values(1)
                                 keymap = {h.lower(): h for h in headers}
+                                # Preserve ISBN as text to avoid 9.78E+12 formatting
+                                if meta.get("ISBN"):
+                                    meta["ISBN"] = str(meta["ISBN"]).strip()
+                                    if meta["ISBN"].isdigit():
+                                        meta["ISBN"] = "'" + meta["ISBN"]
                                 row = [meta.get(keymap.get(h.lower(), h), meta.get(h, "")) for h in headers]
-                                ws.append_row(row, value_input_option="USER_ENTERED")
+                                ws.append_row(row, value_input_option="RAW")
                                 st.success("Book added to Library.")
                                 st.cache_data.clear()
+                                st.experimental_rerun()
                             except Exception as e:
                                 st.error(f"Failed to add to Library: {e}")
                     with add_cols[1]:
