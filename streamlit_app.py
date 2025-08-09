@@ -443,7 +443,7 @@ if zbar_decode:
                     cols = st.columns([1,3])
                     with cols[0]:
                         if meta.get("Thumbnail"):
-                            st.image(meta["Thumbnail"], caption=meta.get("Title",""))
+                            st.image(meta["Thumbnail"], caption=meta.get("Title",""), width=150)
                     with cols[1]:
                         st.subheader(meta.get("Title","Unknown Title"))
                         st.write(f"**Author:** {meta.get('Author','Unknown')}")
@@ -455,7 +455,7 @@ if zbar_decode:
                             desc = meta["Description"]
                             st.caption(desc[:800] + ("…" if len(desc) > 800 else ""))
 
-                    a1, a2, a3 = st.columns(3)
+                    a1, a2 = st.columns(2)
                     with a1:
                         if st.button("➕ Add to Library", key="add_scan_lib", use_container_width=True):
                             try:
@@ -472,14 +472,6 @@ if zbar_decode:
                                 st.experimental_rerun()
                             except Exception:
                                 pass
-                    with a3:
-                        if st.button("📝 Fill form above", key="fill_form_from_scan", use_container_width=True):
-                            st.session_state["scan_title"] = meta.get("Title", "")
-                            st.session_state["scan_author"] = meta.get("Author", "")
-                            st.session_state["scan_isbn"] = meta.get("ISBN", "")
-                            st.session_state["last_scan_meta"] = meta
-                            st.success("Filled the form fields with scanned data.")
-                            st.experimental_rerun()
 else:
     st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable in the environment, paste the ISBN manually above.")
 
@@ -532,7 +524,7 @@ with tabs[2]:
                     with cols[0]:
                         thumb = vi.get("imageLinks", {}).get("thumbnail")
                         if thumb:
-                            st.image(thumb)
+                            st.image(thumb, width=100)
                     with cols[1]:
                         st.subheader(vi.get("title", "No Title"))
                         st.write(f"**Author(s):** {', '.join(vi.get('authors', ['N/A']))}")
