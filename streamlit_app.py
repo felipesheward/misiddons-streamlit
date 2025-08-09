@@ -235,6 +235,25 @@ def _ol_fetch_json(url: str) -> dict:
     return {}
 
 @st.cache_data(ttl=86400)
+def get_openlibrary_rating(isbn: str):
+    """Return (avg, count) rating for the book's first work on Open Library, if any."""
+    try:
+        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+        works = bj.get("works") or []
+        if not works:
+            return None, None
+        work_key = works[0].get("key")
+        if not work_key:
+            return None, None
+        rj = _ol_fetch_json(f"https://openlibrary.org{work_key}/ratings.json")
+        summary = rj.get("summary", {}) if isinstance(rj, dict) else {}
+        avg = summary.get("average")
+        count = summary.get("count")
+        return (avg, count)
+    except Exception:
+        return None, None
+
+@st.cache_data(ttl=86400)
 def get_book_details_openlibrary(isbn: str) -> dict:
     """Robust OpenLibrary metadata with description & cover fallbacks via works endpoint."""
     try:
@@ -297,7 +316,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
 
 
 def get_book_metadata(isbn: str) -> dict:
-    """Merge Google + OpenLibrary so missing fields are filled."""
+    """Merge Google + OpenLibrary so missing fields are filled, and compute ratings."""
     g = get_book_details_google(isbn)
     need_keys = ["Description", "Thumbnail", "Language", "Genre", "Title", "Author"]
     o = {}
@@ -310,6 +329,17 @@ def get_book_metadata(isbn: str) -> dict:
         if not merged.get(k) and (o.get(k)):
             merged[k] = o[k]
     merged["Language"] = normalize_language(merged.get("Language", "")) or ("English" if "english literature" in merged.get("Genre", "").lower() else "")
+    # Ratings: Google + OpenLibrary (works)
+    parts = []
+    if g.get("Rating"):
+        parts.append(f"GB:{g['Rating']}")
+    ol_avg, ol_count = get_openlibrary_rating(isbn)
+    if ol_avg:
+        try:
+            parts.append(f"OL:{round(float(ol_avg), 2)}")
+        except Exception:
+            parts.append(f"OL:{ol_avg}")
+    merged["Rating"] = " | ".join(parts)
     for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating"]:
         merged.setdefault(k, "")
     return merged
@@ -389,6 +419,8 @@ if zbar_decode:
                 if not meta:
                     st.error("Couldn't fetch details from Google/OpenLibrary.")
                 else:
+                    with st.expander("Show raw metadata", expanded=False):
+                        st.json(meta)
                     cols = st.columns([1,3])
                     with cols[0]:
                         if meta.get("Thumbnail"):
