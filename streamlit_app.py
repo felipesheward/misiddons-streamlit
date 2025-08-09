@@ -199,10 +199,16 @@ with st.expander("Diagnostics – help me if it still fails"):
 tabs = st.tabs(["Library","Wishlist","Recommendations"])
 with tabs[0]:
     st.header("My Library")
-    st.dataframe(library_df) if not library_df.empty else st.info("Library is empty.")
+    if not library_df.empty:
+        st.dataframe(library_df, use_container_width=True)
+    else:
+        st.info("Library is empty.")
 with tabs[1]:
     st.header("My Wishlist")
-    st.dataframe(wishlist_df) if not wishlist_df.empty else st.info("Wishlist is empty.")
+    if not wishlist_df.empty:
+        st.dataframe(wishlist_df, use_container_width=True)
+    else:
+        st.info("Wishlist is empty.")
 with tabs[2]:
     st.header("Recommendations")
     if not library_df.empty:
