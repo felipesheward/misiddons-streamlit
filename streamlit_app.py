@@ -30,8 +30,9 @@ from gspread.exceptions import APIError, WorksheetNotFound
 #   google_sheet_id = "<YOUR_SPREADSHEET_ID>"
 #   google_sheet_name = "database"
 
-SPREADSHEET_ID = st.secrets.get("google_sheet_id")
-GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name")
+DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
+SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
+GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
 
 # Optional barcode support
 try:
@@ -104,7 +105,7 @@ def load_data(worksheet: str) -> pd.DataFrame:
         return pd.DataFrame()
     except APIError as e:
         code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
-        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}).")
+        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}). If 404/403, re‑share the sheet with the service account and verify the ID.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
@@ -184,7 +185,7 @@ with st.expander("Diagnostics – help me if it still fails"):
     try:
         acct = st.secrets["gcp_service_account"].get("client_email", "(missing)") if "gcp_service_account" in st.secrets else "(no secrets found)"
         st.write("Service account email:", acct)
-        st.write("Spreadsheet ID:", SPREADSHEET_ID or "(not set)")
+        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
         try:
             test_client = connect_to_gsheets()
             if test_client:
@@ -192,6 +193,8 @@ with st.expander("Diagnostics – help me if it still fails"):
                 st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
         except Exception as e:
             st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
+            st.write("Tip: ensure this sheet is shared with:")
+            st.code("book-app-connector@misiddons-book-databse.iam.gserviceaccount.com")
     except Exception as e:
         st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
 
