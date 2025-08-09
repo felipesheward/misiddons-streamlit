@@ -477,8 +477,6 @@ else:
 
 st.divider()
 
-
-
 # ---- Tabs ----
 tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
 with tabs[0]:
