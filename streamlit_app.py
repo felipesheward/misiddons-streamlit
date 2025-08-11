@@ -361,28 +361,32 @@ def get_book_metadata(isbn: str) -> dict:
     """Merge details from multiple sources for a robust result."""
     meta = get_book_details_google(isbn)
     
-    # If Google Books returns an incomplete result (e.g., missing description),
-    # try OpenLibrary to fill in the gaps.
+    # Check if Google Books returned a valid title. If not, fallback to OpenLibrary.
+    if not meta.get("Title"):
+        st.info("Google Books search failed. Falling back to OpenLibrary for a complete search.")
+        meta = get_book_details_openlibrary(isbn)
+
+    # If the description is still missing after the initial search, try to get it from OpenLibrary
+    # and merge the results. This handles cases where Google has a title but no description.
     if not meta.get("Description"):
-        st.info("Falling back to OpenLibrary for a more complete description.")
+        st.info("Description missing. Attempting to get it from OpenLibrary...")
         ol_meta = get_book_details_openlibrary(isbn)
-        
-        # Merge OpenLibrary data, but prioritize existing fields from Google Books
-        # to prevent overwriting more accurate data.
-        temp_meta = {**ol_meta, **meta}
-        meta = temp_meta
+        # Merge OpenLibrary data, but prioritize existing fields from the first source
+        # to prevent overwriting potentially more accurate data.
+        meta = {**ol_meta, **meta}
 
     # Ensure all required keys exist, even if empty
     required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
     for k in required_keys:
         meta.setdefault(k, "")
     
-    # Re-fetch ratings to ensure they are merged correctly from all sources
+    # Re-fetch and merge ratings from all sources
     ratings_parts = []
     
     # Add Google Books rating
-    if meta.get("Rating"):
-        ratings_parts.append(f"GB:{meta['Rating']}")
+    g_rating = get_book_details_google(isbn).get("Rating")
+    if g_rating:
+        ratings_parts.append(f"GB:{g_rating}")
 
     # Add OpenLibrary rating
     ol_avg, ol_count = get_openlibrary_rating(isbn)
