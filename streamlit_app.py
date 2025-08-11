@@ -12,6 +12,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
     - Recommendations filter out owned books
     - More readable DataFrame display
     - Authors' names with special characters are now handled correctly
+    - Added Statistics section with book counts
 """
 from __future__ import annotations
 
@@ -564,7 +565,7 @@ else:
 st.divider()
 
 # --- Tabs ---
-tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
+tabs = st.tabs(["Library", "Wishlist", "Statistics", "Recommendations"])
 
 with tabs[0]:
     st.header("My Library")
@@ -615,6 +616,27 @@ with tabs[1]:
         st.info("Your wishlist is empty. Scan a book or add one manually!")
 
 with tabs[2]:
+    st.header("Statistics")
+    library_df = load_data("Library")
+    wishlist_df = load_data("Wishlist")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Total Books in Library", len(library_df))
+    with col2:
+        st.metric("Total Books on Wishlist", len(wishlist_df))
+    
+    if not library_df.empty or not wishlist_df.empty:
+        stats_data = pd.DataFrame({
+            'Category': ['Library', 'Wishlist'],
+            'Count': [len(library_df), len(wishlist_df)]
+        })
+        st.bar_chart(stats_data.set_index('Category'))
+    else:
+        st.info("No data available to show statistics.")
+
+with tabs[3]:
     st.header("Recommendations")
     library_df = load_data("Library")
     wishlist_df = load_data("Wishlist")
