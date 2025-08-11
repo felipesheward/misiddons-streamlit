@@ -9,7 +9,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
 - ENHANCEMENTS:
     - Search bar for filtering books
     - Improved feedback messages
-    - Recommendations: show 4 random picks from your Library/Wishlist
+    - Recommendations filter out owned books (now fixed, with Google + OpenLibrary fallback)
     - More readable DataFrame display
     - Authors' names with special characters are handled correctly
     - Statistics section (metrics only, chart removed)
@@ -358,6 +358,73 @@ def get_book_metadata(isbn: str) -> dict:
 
     return meta
 
+# ---------- Recommendations (fixed: Google first, OL fallback) ----------
+@st.cache_data(ttl=86400)
+def get_recommendations_by_author(author: str) -> list[dict]:
+    if not author:
+        return []
+    results: list[dict] = []
+
+    # Try Google Books first
+    try:
+        params = {"q": f"inauthor:{author}", "printType": "books", "maxResults": 20, "orderBy": "relevance"}
+        if GOOGLE_BOOKS_KEY:
+            params["key"] = GOOGLE_BOOKS_KEY
+        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
+        if r.ok:
+            for item in r.json().get("items", []):
+                vi = item.get("volumeInfo", {})
+                isbn = ""
+                for ident in vi.get("industryIdentifiers", []) or []:
+                    if ident.get("type") in ("ISBN_13", "ISBN_10"):
+                        isbn = ident.get("identifier", "")
+                        break
+                thumb = (vi.get("imageLinks") or {}).get("thumbnail", "")
+                if thumb.startswith("http://"):
+                    thumb = thumb.replace("http://", "https://")
+                results.append({
+                    "source": "google",
+                    "title": vi.get("title", ""),
+                    "authors": ", ".join(vi.get("authors", [])) if vi.get("authors") else "",
+                    "isbn": isbn,
+                    "published": vi.get("publishedDate", ""),
+                    "description": vi.get("description", "") or "",
+                    "thumbnail": thumb,
+                })
+    except Exception:
+        pass
+
+    if results:
+        return results
+
+    # Fallback: OpenLibrary search
+    try:
+        ro = requests.get("https://openlibrary.org/search.json", params={"author": author, "limit": 20}, timeout=12, headers=UA)
+        if ro.ok:
+            data = ro.json()
+            for doc in data.get("docs", []) or []:
+                isbn = (doc.get("isbn") or [""])[0]
+                cover_id = doc.get("cover_i")
+                if cover_id:
+                    thumb = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+                elif isbn:
+                    thumb = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg"
+                else:
+                    thumb = ""
+                results.append({
+                    "source": "openlibrary",
+                    "title": doc.get("title", ""),
+                    "authors": ", ".join(doc.get("author_name", []) or []),
+                    "isbn": isbn,
+                    "published": str(doc.get("first_publish_year", "")),
+                    "description": "",
+                    "thumbnail": thumb,
+                })
+    except Exception:
+        pass
+
+    return results
+
 # ---------- UI helpers ----------
 
 def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
@@ -652,53 +719,82 @@ with tabs[3]:
     library_df = load_data("Library")
     wishlist_df = load_data("Wishlist")
 
-    # Combine all books the user already has in the app
-    combined = pd.concat([library_df, wishlist_df], ignore_index=True) if (not library_df.empty or not wishlist_df.empty) else pd.DataFrame(columns=EXACT_HEADERS)
-
-    if combined.empty:
-        st.info("No books found in Library or Wishlist yet. Add some to get random picks!")
-    else:
-        # Ensure expected columns exist
-        for col in EXACT_HEADERS:
-            if col not in combined.columns:
-                combined[col] = ""
-
-        # Build a de-duplication key: ISBN if present, else Title+Author
-        combined["_key"] = combined["ISBN"].astype(str).map(_normalize_isbn)
-        mask_empty = combined["_key"] == ""
-        combined.loc[mask_empty, "_key"] = (
-            combined["Title"].astype(str).str.strip().str.lower() + " • " +
-            combined["Author"].astype(str).str.strip().str.lower()
+    authors = []
+    if not library_df.empty and "Author" in library_df.columns:
+        authors = (
+            library_df["Author"].dropna()
+            .astype(str)
+            .str.split(",")
+            .explode()
+            .str.strip()
+            .replace({"": None})
+            .dropna()
+            .unique()
+            .tolist()
         )
-        combined = combined.drop_duplicates("_key").drop(columns=["_key"]).reset_index(drop=True)
+        authors = sorted(set(authors), key=lambda s: s.lower())
 
-        # Pick 4 random books
-        k = min(4, len(combined))
-        if st.button("🎲 Shuffle 4 picks"):
-            st.experimental_rerun()  # trigger a fresh random sample
+    if authors:
+        selected_author = st.selectbox("Find books by authors you've read:", authors)
+    else:
+        selected_author = st.text_input("Type an author to get recommendations:")
 
-        picks = combined.sample(n=k) if k > 0 else combined.head(0)
+    if selected_author:
+        recommendations = get_recommendations_by_author(selected_author)
 
-        for _, row in picks.iterrows():
-            title = str(row.get("Title", "")).strip() or "No Title"
-            author = str(row.get("Author", "")).strip()
-            published = str(row.get("PublishedDate", "")).strip()
-            desc = str(row.get("Description", "")).strip()
-            thumb = str(row.get("Thumbnail", "")).strip()
-            cover, _ = _cover_or_placeholder(thumb, title)
+        # Owned titles/ISBNs to filter out
+        owned_titles = set()
+        owned_isbns = set()
+        for df in (library_df, wishlist_df):
+            if not df.empty:
+                if "Title" in df.columns:
+                    owned_titles.update(df["Title"].dropna().astype(str).str.lower().str.strip().tolist())
+                if "ISBN" in df.columns:
+                    owned_isbns.update(df["ISBN"].dropna().astype(str).map(_normalize_isbn).tolist())
+
+        shown = 0
+        for item in recommendations:
+            title = (item.get("title") or "").strip()
+            isbn = _normalize_isbn(item.get("isbn", ""))
+            if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
+                continue
 
             cols = st.columns([1, 4])
             with cols[0]:
-                st.image(cover, width=100)
+                thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
+                st.image(thumb, width=100)
             with cols[1]:
-                st.subheader(title)
-                if author:
-                    st.write(f"**Author(s):** {author}")
-                if published:
-                    st.write(f"**Published:** {published}")
-                if desc:
-                    st.caption(desc if len(desc) <= 400 else desc[:400] + "…")
-            st.markdown("---")
+                st.subheader(title or "No Title")
+                st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
+                st.write(f"**Published:** {item.get('published', 'N/A')}")
+                if item.get("description"):
+                    st.caption(item["description"])
+
+                # Add to Wishlist button per recommendation
+                add_key = f"rec_add_{selected_author}_{shown}"
+                if st.button("🧾 Add to Wishlist", key=add_key):
+                    rec_meta = {
+                        "ISBN": isbn,
+                        "Title": title,
+                        "Author": item.get("authors", ""),
+                        "Genre": "",
+                        "Language": "",
+                        "Thumbnail": item.get("thumbnail", ""),
+                        "Description": (item.get("description") or ""),
+                        "Rating": "",
+                        "PublishedDate": item.get("published", ""),
+                    }
+                    try:
+                        append_record("Wishlist", rec_meta)
+                        st.success(f"Added '{title}' to Wishlist")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not add: {e}")
+                st.markdown("---")
+            shown += 1
+
+        if shown == 0:
+            st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
 
 # ---- Diagnostics (safe to show) ----
 with st.expander("Diagnostics – help me if it still fails"):
