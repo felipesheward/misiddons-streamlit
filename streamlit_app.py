@@ -346,49 +346,56 @@ def get_book_details_openlibrary(isbn: str) -> dict:
     except Exception:
         return {}
 
-def get_book_details_third_party(isbn: str) -> dict:
+def get_goodreads_rating_placeholder(isbn: str) -> str:
     """
-    Placeholder for a third-party API call (e.g., Goodreads).
+    Placeholder function to explain why Goodreads ratings can't be fetched.
     
-    NOTE: Goodreads has stopped issuing API keys to new developers.
-    A real implementation would need to use a working API or web scraping.
+    NOTE: As of February 2020, Goodreads has discontinued its public developer API
+    and is no longer issuing new API keys. Therefore, a direct integration is not
+    possible for new projects. This function serves as a placeholder to
+    acknowledge the request and explain the limitation.
     """
-    st.info("Falling back to a third-party source for metadata...")
-    # This is a placeholder. You would replace this with actual API call logic.
-    return {}
-
+    return "GR:unavailable"
 
 def get_book_metadata(isbn: str) -> dict:
     """Merge details from multiple sources for a robust result."""
     meta = get_book_details_google(isbn)
     
-    # If Google Books returns an incomplete result, try OpenLibrary
-    if not meta.get("Title"):
+    # If Google Books returns an incomplete result (e.g., missing description),
+    # try OpenLibrary to fill in the gaps.
+    if not meta.get("Description"):
+        st.info("Falling back to OpenLibrary for a more complete description.")
         ol_meta = get_book_details_openlibrary(isbn)
-        meta = {**ol_meta, **meta} # Prefer data from the first source when available
-    
-    # If OpenLibrary also fails, try a third-party source
-    if not meta.get("Title"):
-        third_party_meta = get_book_details_third_party(isbn)
-        meta = {**third_party_meta, **meta}
+        
+        # Merge OpenLibrary data, but prioritize existing fields from Google Books
+        # to prevent overwriting more accurate data.
+        temp_meta = {**ol_meta, **meta}
+        meta = temp_meta
 
     # Ensure all required keys exist, even if empty
     required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
     for k in required_keys:
         meta.setdefault(k, "")
     
-    # Re-fetch ratings to ensure they are merged correctly if one source has them and another doesn't
-    g = get_book_details_google(isbn)
+    # Re-fetch ratings to ensure they are merged correctly from all sources
+    ratings_parts = []
+    
+    # Add Google Books rating
+    if meta.get("Rating"):
+        ratings_parts.append(f"GB:{meta['Rating']}")
+
+    # Add OpenLibrary rating
     ol_avg, ol_count = get_openlibrary_rating(isbn)
-    parts = []
-    if g.get("Rating"):
-        parts.append(f"GB:{g['Rating']}")
     if ol_avg:
         try:
-            parts.append(f"OL:{round(float(ol_avg), 2)}")
+            ratings_parts.append(f"OL:{round(float(ol_avg), 2)}")
         except Exception:
-            parts.append(f"OL:{ol_avg}")
-    meta["Rating"] = " | ".join(parts)
+            ratings_parts.append(f"OL:{ol_avg}")
+            
+    # Add Goodreads placeholder rating
+    ratings_parts.append(get_goodreads_rating_placeholder(isbn))
+    
+    meta["Rating"] = " | ".join(ratings_parts)
     
     return meta
 
