@@ -6,7 +6,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
 - Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
-- Shows 4 recommendations (from Library + Wishlist authors) with add buttons
+- Recommends up to 4 books you DON'T already have (based on Library + Wishlist authors & subjects)
 """
 from __future__ import annotations
 
@@ -391,6 +391,51 @@ def get_recommendations_by_author(author: str) -> list:
     return []
 
 # ---------- Recommendation helpers ----------
+def _extract_subjects(df: pd.DataFrame) -> list[str]:
+    """Collect subjects/genres from the 'Genre' column (comma-separated)."""
+    if df is None or df.empty or "Genre" not in df.columns:
+        return []
+    subjects = []
+    for cell in df["Genre"].dropna().astype(str):
+        parts = [p.strip() for p in cell.split(",") if p.strip()]
+        subjects.extend(parts)
+    return subjects
+
+def _top_n(items: list[str], n: int = 5) -> list[str]:
+    """Return top-N most frequent non-empty items."""
+    from collections import Counter
+    items = [i for i in items if str(i).strip()]
+    return [k for k, _ in Counter(items).most_common(n)]
+
+@st.cache_data(ttl=3600)
+def _search_gbooks(query: str, max_results: int = 10) -> list[dict]:
+    """Generic Google Books search helper."""
+    try:
+        params = {"q": query, "maxResults": max_results, "printType": "books"}
+        if GOOGLE_BOOKS_KEY:
+            params["key"] = GOOGLE_BOOKS_KEY
+        r = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params=params,
+            timeout=12,
+            headers={"User-Agent": "misiddons/1.0"},
+        )
+        if r.ok:
+            return r.json().get("items", []) or []
+    except Exception:
+        pass
+    return []
+
+def _existing_keys(df: pd.DataFrame) -> tuple[set[str], set[tuple[str, str]]]:
+    """Build quick lookups to avoid recommending what you already have."""
+    if df is None or df.empty:
+        return set(), set()
+    isbns = set("".join(ch for ch in str(x).replace("'", "") if ch.isdigit())
+                for x in df.get("ISBN", []) if pd.notna(x))
+    ta = set((str(t).strip().lower(), str(a).strip().lower())
+             for t, a in zip(df.get("Title", []), df.get("Author", [])))
+    return isbns, ta
+
 def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
     """Convert a Google Books volumeInfo dict to our meta schema."""
     isbn13 = ""
@@ -420,14 +465,6 @@ def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
         "Rating": str(vi.get("averageRating", "")) if vi.get("averageRating") is not None else "",
         "PublishedDate": vi.get("publishedDate", "") or "",
     }
-
-def _existing_keys(df: pd.DataFrame) -> tuple[set[str], set[tuple[str, str]]]:
-    """Build quick lookups to avoid recommending what you already have."""
-    if df is None or df.empty:
-        return set(), set()
-    isbns = set("".join(ch for ch in str(x).replace("'", "") if ch.isdigit()) for x in df.get("ISBN", []) if pd.notna(x))
-    ta = set((str(t).strip().lower(), str(a).strip().lower()) for t, a in zip(df.get("Title", []), df.get("Author", [])))
-    return isbns, ta
 
 # ---------- Barcode helpers ----------
 def _extract_isbn_from_raw(raw: str) -> str:
@@ -519,9 +556,9 @@ if zbar_decode:
                         st.write(f"**Author:** {meta.get('Author','Unknown')}")
                         st.write(f"**Published Date:** {meta.get('PublishedDate','Unknown')}")
                         if meta.get("Rating"):
-                            st.write(f"**Rating:** {meta["Rating"]}")
+                            st.write(f"**Rating:** {meta['Rating']}")
                         if meta.get("Language"):
-                            st.write(f"**Language:** {meta["Language"]}")
+                            st.write(f"**Language:** {meta['Language']}")
 
                     full_desc = meta.get("Description", "")
                     if full_desc:
@@ -589,33 +626,49 @@ with tabs[2]:
     library_df  = load_data("Library")
     wishlist_df = load_data("Wishlist")
 
-    authors_lib  = library_df["Author"].dropna().tolist() if (library_df is not None and "Author" in library_df.columns) else []
-    authors_wish = wishlist_df["Author"].dropna().tolist() if (wishlist_df is not None and "Author" in wishlist_df.columns) else []
-    seed_authors = sorted({a for a in authors_lib + authors_wish if str(a).strip()})
+    # Build seeds from BOTH tabs
+    authors = []
+    if library_df is not None and not library_df.empty and "Author" in library_df.columns:
+        authors.extend(library_df["Author"].dropna().astype(str).tolist())
+    if wishlist_df is not None and not wishlist_df.empty and "Author" in wishlist_df.columns:
+        authors.extend(wishlist_df["Author"].dropna().astype(str).tolist())
+    top_authors = _top_n(authors, n=5)
 
-    if not seed_authors:
+    subjects = _extract_subjects(library_df) + _extract_subjects(wishlist_df)
+    top_subjects = _top_n(subjects, n=5)
+
+    if not top_authors and not top_subjects:
         st.info("Add a few books (Library or Wishlist) to get tailored recommendations.")
     else:
+        # Exclude anything already owned/wishlisted
         have_isbns_lib, have_ta_lib = _existing_keys(library_df)
         have_isbns_wl,  have_ta_wl  = _existing_keys(wishlist_df)
         have_isbns = have_isbns_lib | have_isbns_wl
         have_ta    = have_ta_lib | have_ta_wl
 
+        # Interleave author and subject queries
+        queries = []
+        for a in top_authors:
+            queries.append(f"inauthor:{quote(a)}")
+        for s in top_subjects:
+            queries.append(f"subject:{quote(s)}")
+
         candidates = []
         seen_ta = set()
 
-        for author in seed_authors:
-            items = get_recommendations_by_author(author) or []
+        for q in queries:
+            items = _search_gbooks(q, max_results=10)
             for item in items:
                 vi = (item or {}).get("volumeInfo", {}) or {}
                 meta = _vi_to_meta("", vi)
+                if not meta["Title"] or not meta["Author"]:
+                    continue
 
                 ta_key = (meta["Title"].strip().lower(), meta["Author"].strip().lower())
                 isbn_key = "".join(ch for ch in str(meta["ISBN"]).replace("'", "") if ch.isdigit())
 
+                # Exclude anything already owned/wishlisted or already picked
                 if (isbn_key and isbn_key in have_isbns) or (ta_key in have_ta) or (ta_key in seen_ta):
-                    continue
-                if not meta["Title"] or not meta["Author"]:
                     continue
 
                 candidates.append(meta)
@@ -626,8 +679,9 @@ with tabs[2]:
                 break
 
         if not candidates:
-            st.info("No fresh recommendations right now (everything I found is already in your Library/Wishlist).")
+            st.info("No fresh recommendations right now (everything I found matches your current Library/Wishlist).")
         else:
+            st.caption("Based on your most frequent authors and subjects.")
             for i, meta in enumerate(candidates, 1):
                 st.markdown(f"**#{i}**")
                 cols = st.columns([1, 4])
@@ -641,7 +695,6 @@ with tabs[2]:
                         st.write(f"**Published:** {meta['PublishedDate']}")
                     if meta.get("Rating"):
                         st.write(f"**Rating:** {meta['Rating']}")
-
                     desc = meta.get("Description", "")
                     if desc:
                         st.caption(desc if len(desc) < 280 else (desc[:280].rstrip() + "…"))
