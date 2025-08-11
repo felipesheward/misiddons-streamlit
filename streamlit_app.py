@@ -380,6 +380,10 @@ def get_book_metadata(isbn: str) -> dict:
     for k in required_keys:
         meta.setdefault(k, "")
 
+    # Explicitly fix the author's name if a known issue occurs
+    if meta.get("Author") == "Jø Lier Horst":
+        meta["Author"] = "Jørn Lier Horst"
+
     ratings_parts = []
     
     if google_meta.get("Rating"):
@@ -403,7 +407,6 @@ def get_recommendations_by_author(author: str) -> list:
     if not author:
         return []
     try:
-        # Pass the author's name as-is for the API search to maintain special characters
         r = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
             params={"q": f"inauthor:{quote(author)}", "maxResults": 8},
