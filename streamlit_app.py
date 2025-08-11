@@ -212,10 +212,15 @@ def get_book_details_google(isbn: str) -> dict:
         if thumb.startswith("http://"):
             thumb = thumb.replace("http://", "https://")
         cats = info.get("categories") or []
+        
+        # Get the first author from the list
+        authors = info.get("authors", [])
+        author = authors[0] if authors else ""
+
         return {
             "ISBN": isbn,
             "Title": info.get("title", ""),
-            "Author": ", ".join(info.get("authors", [])),
+            "Author": author,
             "Genre": ", ".join(cats) if cats else "",
             "Language": (info.get("language") or "").upper(),
             "Thumbnail": thumb,
@@ -268,7 +273,10 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         )
         r.raise_for_status()
         data = r.json().get(f"ISBN:{isbn}") or {}
-        authors = ", ".join([a.get("name", "") for a in data.get("authors", []) if a])
+        # Get the first author from the list
+        authors_list = data.get("authors", [])
+        authors = authors_list[0].get("name", "") if authors_list else ""
+        
         subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
         cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
         desc = data.get("description", "")
