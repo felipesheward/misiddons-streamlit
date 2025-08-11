@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Misiddons Book Database – Streamlit app (Form + Scanner)
-- Add books manually via form
-- Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
-- Add to Library or Wishlist
-- Prevents duplicates (by ISBN or Title+Author)
+Misiddons Book Database – Streamlit app (Form + Scanner + Recommendations)
 """
-from __future__ import annotations
 
+from __future__ import annotations
 import pandas as pd
 import requests
 import streamlit as st
@@ -16,7 +12,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from urllib.parse import quote
 from PIL import Image
-from gspread.exceptions import APIError, WorksheetNotFound
+import re
+from gspread.exceptions import APIError, WorksheetNotFound, SpreadsheetNotFound
 
 # Optional barcode support
 try:
@@ -26,7 +23,14 @@ except Exception:
 
 # ---------- CONFIG ----------
 DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
-SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
+
+def _extract_sheet_id(s: str) -> str:
+    s = (s or "").strip()
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
+    return m.group(1) if m else s
+
+RAW_SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
+SPREADSHEET_ID = _extract_sheet_id(RAW_SPREADSHEET_ID)
 GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
 GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
 
@@ -36,7 +40,7 @@ st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 @st.cache_resource
 def connect_to_gsheets():
     if "gcp_service_account" not in st.secrets:
-        st.error("gcp_service_account not found in secrets. Add your service account JSON there.")
+        st.error("gcp_service_account not found in secrets.")
         return None
     try:
         scopes = [
@@ -51,42 +55,33 @@ def connect_to_gsheets():
 
 @st.cache_data(ttl=60)
 def load_data(worksheet: str) -> pd.DataFrame:
-    """Fetch a worksheet into a DataFrame. Falls back to get_all_values()."""
     client_local = connect_to_gsheets()
     if not client_local:
         return pd.DataFrame()
-    ss = None
     try:
-        ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
-        target = worksheet.strip()
+        ss = client_local.open_by_key(SPREADSHEET_ID)
+        ws = None
         try:
-            ws = ss.worksheet(target)
+            ws = ss.worksheet(worksheet)
         except WorksheetNotFound:
             names = [w.title for w in ss.worksheets()]
             norm = {n.strip().casefold(): n for n in names}
-            if target.strip().casefold() in norm:
-                ws = ss.worksheet(norm[target.strip().casefold()])
+            if worksheet.strip().casefold() in norm:
+                ws = ss.worksheet(norm[worksheet.strip().casefold()])
             else:
                 raise
-        try:
-            df = pd.DataFrame(ws.get_all_records())
-            return df.dropna(how="all")
-        except Exception:
-            vals = ws.get_all_values()
-            if not vals:
-                return pd.DataFrame()
-            header, *rows = vals
-            return pd.DataFrame(rows, columns=header).dropna(how="all")
-    except WorksheetNotFound:
-        try:
-            tabs = [w.title for w in ss.worksheets()] if ss else []
-        except Exception:
-            tabs = []
-        st.error(f"Worksheet '{worksheet}' not found. Available tabs: {tabs}")
+        df = pd.DataFrame(ws.get_all_records())
+        return df.dropna(how="all")
+    except SpreadsheetNotFound:
+        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
+        st.error(
+            f"Spreadsheet not found.\nID: `{SPREADSHEET_ID}`\n"
+            f"Share your sheet with `{acct}` as **Editor**."
+        )
         return pd.DataFrame()
     except APIError as e:
         code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
-        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}). If 404/403, re-share the sheet with the service account and verify the ID.")
+        st.error(f"Google Sheets API error ({code}).")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
@@ -97,52 +92,29 @@ def _get_ws(tab: str):
     client = connect_to_gsheets()
     if not client:
         return None
-    ss = client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client.open(GOOGLE_SHEET_NAME)
-    t = tab.strip()
     try:
-        return ss.worksheet(t)
-    except WorksheetNotFound:
-        names = [w.title for w in ss.worksheets()]
-        norm = {n.strip().casefold(): n for n in names}
-        if t.casefold() in norm:
-            return ss.worksheet(norm[t.casefold()])
-        raise
+        ss = client.open_by_key(SPREADSHEET_ID)
+        return ss.worksheet(tab)
+    except SpreadsheetNotFound:
+        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
+        st.error(f"Spreadsheet not found. Share with `{acct}`.")
+        return None
 
 # ---------- Sheet write helpers ----------
-# Added "PublishedDate" to the list of fixed headers
 EXACT_HEADERS = [
     "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate","Date Read"
 ]
-
-ISO_LANG = {
-    "EN":"English","IT":"Italian","ES":"Spanish","DE":"German","FR":"French",
-    "PT":"Portuguese","NL":"Dutch","SV":"Swedish","NO":"Norwegian","DA":"Danish",
-    "FI":"Finnish","RU":"Russian","PL":"Polish","TR":"Turkish","ZH":"Chinese",
-    "JA":"Japanese","KO":"Korean","AR":"Arabic","HE":"Hebrew","HI":"Hindi"
-}
-
-def normalize_language(s: str) -> str:
-    if not s:
-        return ""
-    s = str(s).strip()
-    if len(s) <= 3:
-        return ISO_LANG.get(s.upper(), s.upper())
-    return s
-
 
 def _normalize_isbn(s: str) -> str:
     if not s:
         return ""
     return "".join(ch for ch in str(s).replace("'", "") if ch.isdigit())
 
-
 def append_record(tab: str, record: dict) -> None:
-    """Ensure headers, dedupe (ISBN or Title+Author), preserve ISBN as text, then append."""
     try:
         ws = _get_ws(tab)
         if not ws:
             raise RuntimeError("Worksheet not found")
-        # 1) Ensure headers in a fixed order (keep any extras at the end)
         headers = [h.strip() for h in ws.row_values(1)]
         if not headers:
             headers = EXACT_HEADERS[:]
@@ -151,7 +123,6 @@ def append_record(tab: str, record: dict) -> None:
             extras = [h for h in headers if h not in EXACT_HEADERS]
             headers = EXACT_HEADERS[:] + extras
             ws.update('A1', [headers])
-        # 2) De-dup in this tab
         values = ws.get_all_values()
         existing_isbns, existing_ta = set(), set()
         i_isbn = headers.index("ISBN") if "ISBN" in headers else None
@@ -170,12 +141,11 @@ def append_record(tab: str, record: dict) -> None:
         inc_isbn_norm = _normalize_isbn(record.get("ISBN", ""))
         inc_ta = ((record.get("Title", "").strip().lower()), (record.get("Author", "").strip().lower()))
         if inc_isbn_norm and inc_isbn_norm in existing_isbns:
-            st.info(f"'{record.get('Title','(unknown)')}' is already in {tab} (same ISBN). Skipped.")
+            st.info(f"Already in {tab} (same ISBN).")
             return
         if inc_ta in existing_ta:
-            st.info(f"'{record.get('Title','(unknown)')}' by {record.get('Author','?')} is already in {tab}. Skipped.")
+            st.info(f"Already in {tab} (same Title+Author).")
             return
-        # 3) Preserve ISBN as text, build row in header order, append
         if record.get("ISBN") and str(record["ISBN"]).isdigit():
             record["ISBN"] = "'" + str(record["ISBN"]).strip()
         keymap = {h.lower(): h for h in headers}
@@ -189,237 +159,78 @@ def append_record(tab: str, record: dict) -> None:
 # ---------- Metadata fetchers ----------
 @st.cache_data(ttl=86400)
 def get_book_details_google(isbn: str) -> dict:
-    if not isbn:
-        return {}
     try:
-        params = {"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1}
+        params = {"q": f"isbn:{isbn}", "maxResults": 1}
         if GOOGLE_BOOKS_KEY:
             params["key"] = GOOGLE_BOOKS_KEY
-        r = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params=params,
-            timeout=12,
-            headers={"User-Agent": "misiddons/1.0"},
-        )
+        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12)
         r.raise_for_status()
         items = r.json().get("items", [])
         if not items:
             return {}
         info = items[0].get("volumeInfo", {})
-        desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet")
-        thumbs = info.get("imageLinks") or {}
-        thumb = thumbs.get("thumbnail") or thumbs.get("smallThumbnail") or ""
-        if thumb.startswith("http://"):
-            thumb = thumb.replace("http://", "https://")
-        cats = info.get("categories") or []
-        
-        # Get the first author from the list
         authors = info.get("authors", [])
         author = authors[0] if authors else ""
-
+        thumbs = info.get("imageLinks") or {}
+        thumb = thumbs.get("thumbnail", "")
         return {
             "ISBN": isbn,
             "Title": info.get("title", ""),
             "Author": author,
-            "Genre": ", ".join(cats) if cats else "",
+            "Genre": ", ".join(info.get("categories", [])),
             "Language": (info.get("language") or "").upper(),
             "Thumbnail": thumb,
-            "Description": (desc or "").strip(),
+            "Description": info.get("description", ""),
             "Rating": str(info.get("averageRating", "")),
-            # Added publishedDate to the returned dictionary
             "PublishedDate": info.get("publishedDate", ""),
         }
     except Exception:
         return {}
 
 @st.cache_data(ttl=86400)
-def _ol_fetch_json(url: str) -> dict:
-    try:
-        r = requests.get(url, timeout=12, headers={"User-Agent": "misiddons/1.0"})
-        if r.ok:
-            return r.json()
-    except Exception:
-        pass
-    return {}
-
-@st.cache_data(ttl=86400)
-def get_openlibrary_rating(isbn: str):
-    """Return (avg, count) rating for the book's first work on Open Library, if any."""
-    try:
-        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
-        works = bj.get("works") or []
-        if not works:
-            return None, None
-        work_key = works[0].get("key")
-        if not work_key:
-            return None, None
-        rj = _ol_fetch_json(f"https://openlibrary.org{work_key}/ratings.json")
-        summary = rj.get("summary", {}) if isinstance(rj, dict) else {}
-        avg = summary.get("average")
-        count = summary.get("count")
-        return (avg, count)
-    except Exception:
-        return None, None
-
-@st.cache_data(ttl=86400)
 def get_book_details_openlibrary(isbn: str) -> dict:
-    """Robust OpenLibrary metadata with description & cover fallbacks via works/details endpoints."""
     try:
         r = requests.get(
             "https://openlibrary.org/api/books",
             params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
             timeout=12,
-            headers={"User-Agent": "misiddons/1.0"},
         )
         r.raise_for_status()
         data = r.json().get(f"ISBN:{isbn}") or {}
-        # Get the first author from the list
         authors_list = data.get("authors", [])
-        authors = authors_list[0].get("name", "") if authors_list else ""
-        
-        subjects = ", ".join([s.get("name", "") for s in data.get("subjects", []) if s])
-        cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
+        author = authors_list[0].get("name", "") if authors_list else ""
+        cover = (data.get("cover") or {}).get("large", "")
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
-        # Extra fallback: jscmd=details may contain description
-        if not desc:
-            try:
-                rd = requests.get(
-                    "https://openlibrary.org/api/books",
-                    params={"bibkeys": f"ISBN:{isbn}", "jscmd": "details", "format": "json"},
-                    timeout=12,
-                    headers={"User-Agent": "misiddons/1.0"},
-                )
-                if rd.ok:
-                    details = (rd.json().get(f"ISBN:{isbn}") or {}).get("details", {})
-                    d2 = details.get("description")
-                    if isinstance(d2, dict):
-                        d2 = d2.get("value")
-                    if isinstance(d2, str) and d2:
-                        desc = d2
-            except Exception:
-                pass
-        # Fallback: /isbn and then /works
-        if not desc or not cover or not data.get("languages"):
-            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
-            if (not cover) and bj.get("covers"):
-                try:
-                    cover_id = bj["covers"][0]
-                    cover = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
-                except Exception:
-                    pass
-            works = bj.get("works") or []
-            if works:
-                wk = works[0].get("key")
-                if wk:
-                    wj = _ol_fetch_json(f"https://openlibrary.org{wk}.json")
-                    d = wj.get("description", "")
-                    if isinstance(d, dict):
-                        d = d.get("value", "")
-                    if d and not desc:
-                        desc = d
-        # Language
-        lang = ""
-        try:
-            lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
-        except Exception:
-            bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
-            try:
-                lang_codes = bj.get("languages", [])
-                if lang_codes:
-                    lang = lang_codes[0].get("key", "").split("/")[-1].upper()
-            except Exception:
-                lang = ""
-        # Added publish_date to the returned dictionary
-        published_date = data.get("publish_date", "")
         return {
             "ISBN": isbn,
             "Title": data.get("title", ""),
-            "Author": authors,
-            "Genre": subjects,
-            "Language": lang,
+            "Author": author,
+            "Genre": ", ".join([s.get("name", "") for s in data.get("subjects", [])]),
+            "Language": "",
             "Thumbnail": cover,
-            "Description": (desc or "").strip(),
-            "PublishedDate": published_date,
+            "Description": desc,
+            "PublishedDate": data.get("publish_date", ""),
         }
     except Exception:
         return {}
 
-def get_goodreads_rating_placeholder(isbn: str) -> str:
-    """
-    Placeholder function to explain why Goodreads ratings can't be fetched.
-    
-    NOTE: As of February 2020, Goodreads has discontinued its public developer API
-    and is no longer issuing new API keys. Therefore, a direct integration is not
-    possible for new projects. This function serves as a placeholder to
-    acknowledge the request and explain the limitation.
-    """
-    return "GR:unavailable"
-
 def get_book_metadata(isbn: str) -> dict:
-    """Merge details from multiple sources for a robust result."""
-    
-    # Fetch details from both sources once
-    google_meta = get_book_details_google(isbn)
-    openlibrary_meta = get_book_details_openlibrary(isbn)
-    
-    # Initialize meta with data from Google Books
-    meta = google_meta.copy()
-
-    # Fallback to OpenLibrary if Google Books is missing key info
-    if not meta.get("Title"):
-        st.info("Google Books search failed. Falling back to OpenLibrary for a complete search.")
-        meta = openlibrary_meta.copy()
-
-    # If the description is still missing after the initial search, try OpenLibrary again
-    # to fill in the gaps. This handles cases where Google has a title but no description.
-    if not meta.get("Description") and openlibrary_meta.get("Description"):
-        st.info("Description missing from Google Books. Using OpenLibrary data.")
-        meta["Description"] = openlibrary_meta["Description"]
-    
-    # Fallback for other fields if they are missing
-    for key in ["Title", "Author", "Genre", "Language", "Thumbnail", "PublishedDate"]:
-        if not meta.get(key) and openlibrary_meta.get(key):
-            meta[key] = openlibrary_meta[key]
-    
-    # Ensure all required keys exist, even if empty
-    required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
-    for k in required_keys:
+    g = get_book_details_google(isbn)
+    o = get_book_details_openlibrary(isbn)
+    meta = {**o, **g}  # Google overrides OpenLibrary if present
+    for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
         meta.setdefault(k, "")
-
-    # Re-fetch and merge ratings from all sources
-    ratings_parts = []
-    
-    # Add Google Books rating
-    if google_meta.get("Rating"):
-        ratings_parts.append(f"GB:{google_meta['Rating']}")
-
-    # Add OpenLibrary rating
-    ol_avg, ol_count = get_openlibrary_rating(isbn)
-    if ol_avg:
-        try:
-            ratings_parts.append(f"OL:{round(float(ol_avg), 2)}")
-        except Exception:
-            ratings_parts.append(f"OL:{ol_avg}")
-            
-    # Add Goodreads placeholder rating
-    ratings_parts.append(get_goodreads_rating_placeholder(isbn))
-    
-    meta["Rating"] = " | ".join(ratings_parts)
-    
     return meta
 
 @st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list:
-    if not author:
-        return []
     try:
         r = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
-            params={"q": f"inauthor:{quote(author)}", "maxResults": 8},
+            params={"q": f"inauthor:{quote(author)}", "maxResults": 10},
             timeout=12,
-            headers={"User-Agent": "misiddons/1.0"},
         )
         if r.ok:
             return r.json().get("items", [])
@@ -427,195 +238,64 @@ def get_recommendations_by_author(author: str) -> list:
         pass
     return []
 
-# ---------- Barcode helpers ----------
-def _extract_isbn_from_raw(raw: str) -> str:
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) >= 13:
-        return digits[-13:]
-    return digits
-
 # ---------- UI ----------
 st.title("Misiddons Book Database")
 
-# — Add Book Form —
-with st.expander("✍️ Add a New Book", expanded=False):
-    with st.form("entry_form"):
-        # Pre-populate form fields with scanned data if available
-        cols = st.columns(5)
-        title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
-        author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
-        isbn = cols[2].text_input("ISBN (Optional)", value=st.session_state.get("scan_isbn", ""))
-        date_read = cols[3].text_input("Date Read", placeholder="YYYY/MM/DD")
-        choice = cols[4].radio("Add to:", ["Library", "Wishlist"], horizontal=True)
-
-        if st.form_submit_button("Add Book"):
-            if title and author:
-                try:
-                    scan_meta = st.session_state.get("last_scan_meta", {})
-                    rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
-                    # Add all other metadata from the scan to the record
-                    for k in ["Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
-                        if k in scan_meta and scan_meta[k] and k not in rec:
-                            rec[k] = scan_meta[k]
-                    append_record(choice, rec)
-                    st.success(f"Added '{title}' to {choice}.")
-                    # Clear session state for next entry
-                    st.session_state["scan_isbn"] = ""
-                    st.session_state["scan_title"] = ""
-                    st.session_state["scan_author"] = ""
-                    st.session_state["last_scan_meta"] = {}
-                    st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Failed to add book: {e}")
-            else:
-                st.warning("Enter both title and author.")
-
-# — Barcode scanner (from image) —
-if zbar_decode:
-    with st.expander("📷 Scan Barcode from Photo"):
-        up = st.file_uploader("Upload a photo of the barcode", type=["png","jpg","jpeg"])
-        if up:
-            try:
-                img = Image.open(up)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                codes = zbar_decode(img)
-            except Exception:
-                codes = []
-            if not codes:
-                st.warning("No barcode found. Try a closer, sharper photo.")
-            else:
-                raw = codes[0].data.decode(errors="ignore")
-                isbn_bc = _extract_isbn_from_raw(raw)
-                st.info(f"Detected code: {raw} → Using ISBN: {isbn_bc}")
-
-                with st.spinner("Fetching book details..."):
-                    meta = get_book_metadata(isbn_bc)
-
-                if not meta or not meta.get("Title"):
-                    st.error("Couldn't fetch details from Google/OpenLibrary. Check the ISBN or try again.")
-                else:
-                    # Update session state for the manual entry form
-                    st.session_state["scan_isbn"] = meta.get("ISBN", "")
-                    st.session_state["scan_title"] = meta.get("Title", "")
-                    st.session_state["scan_author"] = meta.get("Author", "")
-                    st.session_state["last_scan_meta"] = meta
-
-                    with st.expander("Show raw metadata", expanded=False):
-                        st.json(meta)
-                    
-                    cols = st.columns([1,3])
-                    with cols[0]:
-                        if meta.get("Thumbnail"):
-                            st.image(meta["Thumbnail"], caption=meta.get("Title",""), width=150)
-                    with cols[1]:
-                        st.subheader(meta.get("Title","Unknown Title"))
-                        st.write(f"**Author:** {meta.get('Author','Unknown')}")
-                        st.write(f"**Published Date:** {meta.get('PublishedDate','Unknown')}")
-                        if meta.get("Rating"):
-                             st.write(f"**Rating:** {meta.get('Rating')}")
-                        if meta.get("Language"):
-                            st.write(f"**Language:** {meta.get('Language')}")
-
-                    # Description with 'Read more' logic
-                    full_desc = meta.get("Description", "")
-                    if full_desc:
-                        # Split the description by newlines to count lines
-                        lines = full_desc.split('\n')
-                        # Heuristic: show the first 5 lines or the first 500 characters
-                        if len(lines) > 5 or len(full_desc) > 500:
-                            short_desc = "\n".join(lines[:5])
-                            with st.expander("Description (click to expand)"):
-                                st.write(full_desc)
-                        else:
-                            st.caption(full_desc)
-
-                    a1, a2 = st.columns(2)
-                    with a1:
-                        if st.button("➕ Add to Library", key="add_scan_lib", use_container_width=True):
-                            try:
-                                append_record("Library", meta)
-                                st.success("Added to Library ✔")
-                                st.session_state["scan_isbn"] = ""
-                                st.session_state["scan_title"] = ""
-                                st.session_state["scan_author"] = ""
-                                st.session_state["last_scan_meta"] = {}
-                                st.experimental_rerun()
-                            except Exception:
-                                pass
-                    with a2:
-                        if st.button("🧾 Add to Wishlist", key="add_scan_wl", use_container_width=True):
-                            try:
-                                append_record("Wishlist", meta)
-                                st.success("Added to Wishlist ✔")
-                                st.session_state["scan_isbn"] = ""
-                                st.session_state["scan_title"] = ""
-                                st.session_state["scan_author"] = ""
-                                st.session_state["last_scan_meta"] = {}
-                                st.experimental_rerun()
-                            except Exception:
-                                pass
-else:
-    st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable in the environment, paste the ISBN manually above.")
-
-st.divider()
-
-# ---- Tabs ----
 tabs = st.tabs(["Library", "Wishlist", "Recommendations"])
+
 with tabs[0]:
     st.header("My Library")
     library_df = load_data("Library")
     if not library_df.empty:
-        st.dataframe(library_df, use_container_width=True)
+        st.dataframe(library_df)
     else:
-        st.info("Library is empty.")
+        st.info("Library empty.")
+
 with tabs[1]:
     st.header("My Wishlist")
     wishlist_df = load_data("Wishlist")
     if not wishlist_df.empty:
-        st.dataframe(wishlist_df, use_container_width=True)
+        st.dataframe(wishlist_df)
     else:
-        st.info("Wishlist is empty.")
+        st.info("Wishlist empty.")
+
 with tabs[2]:
     st.header("Recommendations")
     library_df = load_data("Library")
-    if not library_df.empty and "Author" in library_df.columns:
+    wishlist_df = load_data("Wishlist")
+    owned_titles = set(library_df["Title"].dropna().str.lower()) | set(wishlist_df["Title"].dropna().str.lower())
+    if not library_df.empty:
         authors = library_df["Author"].dropna().unique()
-        selected_author = st.selectbox("Find books by authors you've read:", authors)
-        if selected_author:
-            recommendations = get_recommendations_by_author(selected_author)
-            if recommendations:
-                for item in recommendations:
-                    vi = item.get("volumeInfo", {})
-                    cols = st.columns([1, 4])
-                    with cols[0]:
-                        thumb = vi.get("imageLinks", {}).get("thumbnail")
-                        if thumb:
-                            st.image(thumb, width=100)
-                    with cols[1]:
-                        st.subheader(vi.get("title", "No Title"))
-                        st.write(f"**Author(s):** {', '.join(vi.get('authors', ['N/A']))}")
-                        st.write(f"**Published:** {vi.get('publishedDate', 'N/A')}")
-                        st.caption(vi.get("description", 'No description available.'))
-                        st.markdown("---")
-            else:
-                st.info("No recommendations found.")
+        author = st.selectbox("Select author:", authors)
+        if author:
+            recs = get_recommendations_by_author(author)
+            shown = 0
+            for item in recs:
+                vi = item.get("volumeInfo", {})
+                if vi.get("title", "").lower() in owned_titles:
+                    continue
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    if "imageLinks" in vi:
+                        st.image(vi["imageLinks"].get("thumbnail", ""), width=100)
+                with cols[1]:
+                    st.subheader(vi.get("title", "No Title"))
+                    st.write(f"**Author(s):** {', '.join(vi.get('authors', []))}")
+                    st.write(f"**Published:** {vi.get('publishedDate', 'N/A')}")
+                    st.caption(vi.get("description", "No description"))
+                    meta = get_book_metadata(vi.get("industryIdentifiers", [{}])[0].get("identifier", ""))
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        if st.button(f"Add to Library {shown}", key=f"lib{shown}"):
+                            append_record("Library", meta)
+                            st.success("Added to Library ✔")
+                    with a2:
+                        if st.button(f"Add to Wishlist {shown}", key=f"wl{shown}"):
+                            append_record("Wishlist", meta)
+                            st.success("Added to Wishlist ✔")
+                st.markdown("---")
+                shown += 1
+                if shown >= 4:
+                    break
     else:
-        st.info("Read some books to get recommendations!")
-
-
-# ---- Diagnostics (safe to show) ----
-with st.expander("Diagnostics – help me if it still fails"):
-    try:
-        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
-        st.write("Service account email:", acct)
-        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
-        try:
-            test_client = connect_to_gsheets()
-            if test_client:
-                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
-                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
-        except Exception as e:
-            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
-    except Exception as e:
-        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
+        st.info("Add books to your Library to get recommendations.")
