@@ -6,6 +6,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
 - Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
+- Shows 4 recommendations (from Library + Wishlist authors) with add buttons
 """
 from __future__ import annotations
 
@@ -112,7 +113,6 @@ def _get_ws(tab: str):
         raise
 
 # ---------- Sheet write helpers ----------
-# Added "PublishedDate" to the list of fixed headers
 EXACT_HEADERS = [
     "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate","Date Read"
 ]
@@ -216,19 +216,13 @@ def get_book_details_google(isbn: str) -> dict:
             return {}
 
         info = items[0].get("volumeInfo", {}) or {}
-        # description: try description -> searchInfo.textSnippet -> empty
         desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet") or ""
-
-        # thumbnails: ensure HTTPS; sometimes only 'smallThumbnail' is present
         links = info.get("imageLinks", {}) or {}
         thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
         if thumb.startswith("http://"):
             thumb = thumb.replace("http://", "https://")
-
-        # author: prefer the first author if present
         authors = info.get("authors") or []
         author = authors[0] if authors else ""
-
         cats = info.get("categories") or []
         return {
             "ISBN": isbn,
@@ -277,7 +271,6 @@ def get_openlibrary_rating(isbn: str):
 def get_book_details_openlibrary(isbn: str) -> dict:
     """Robust OpenLibrary metadata with description & cover fallbacks via works/details endpoints."""
     try:
-        # 1) jscmd=data endpoint (rich metadata)
         r = requests.get(
             "https://openlibrary.org/api/books",
             params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
@@ -287,19 +280,15 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         r.raise_for_status()
         data = r.json().get(f"ISBN:{isbn}", {}) or {}
 
-        # author (first only)
         authors_list = data.get("authors") or []
         author = authors_list[0]["name"] if authors_list else ""
-
         subjects = ", ".join(s.get("name", "") for s in data.get("subjects", []) if s) or ""
         cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
 
-        # description can be str or dict
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
 
-        # 2) If missing desc/cover/lang, use /isbn and /works
         bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
         if not desc:
             works = bj.get("works") or []
@@ -312,18 +301,15 @@ def get_book_details_openlibrary(isbn: str) -> dict:
                 desc = d or desc
 
         if not cover:
-            # Fallback 1: cover id (if present)
             if bj.get("covers"):
                 try:
                     cover_id = bj["covers"][0]
                     cover = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
                 except Exception:
                     pass
-            # Fallback 2: ISBN-based cover service
             if not cover:
                 cover = f"https://covers.openlibrary.org/b/ISBN/{isbn}-L.jpg"
 
-        # Language: try primary from 'data', else bj.languages
         lang = ""
         try:
             lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
@@ -354,9 +340,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         return {}
 
 def get_goodreads_rating_placeholder(isbn: str) -> str:
-    """
-    Placeholder explaining Goodreads ratings can't be fetched (no public API).
-    """
+    """Placeholder explaining Goodreads ratings can't be fetched (no public API)."""
     return "GR:unavailable"
 
 def get_book_metadata(isbn: str) -> dict:
@@ -364,24 +348,20 @@ def get_book_metadata(isbn: str) -> dict:
     google_meta = get_book_details_google(isbn)
     openlibrary_meta = get_book_details_openlibrary(isbn)
 
-    # Prefer Google when present; else OL
     meta = google_meta.copy() if google_meta else openlibrary_meta.copy()
 
-    # Fill any missing fields from OpenLibrary
     for key in ["Title","Author","Genre","Language","Thumbnail","Description","PublishedDate"]:
         if not meta.get(key) and openlibrary_meta.get(key):
             meta[key] = openlibrary_meta[key]
 
-    # Ensure all required keys exist
     required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
     for k in required_keys:
         meta.setdefault(k, "")
 
-    # Ratings: Google + OpenLibrary + placeholder Goodreads
     ratings_parts = []
     if google_meta.get("Rating"):
         ratings_parts.append(f"GB:{google_meta['Rating']}")
-    ol_avg, ol_count = get_openlibrary_rating(isbn)
+    ol_avg, _ = get_openlibrary_rating(isbn)
     if ol_avg is not None:
         try:
             ratings_parts.append(f"OL:{round(float(ol_avg), 2)}")
@@ -390,7 +370,6 @@ def get_book_metadata(isbn: str) -> dict:
     ratings_parts.append(get_goodreads_rating_placeholder(isbn))
     meta["Rating"] = " | ".join([p for p in ratings_parts if p])
 
-    # Keep raw digits; append_record will add "'" to preserve as text
     meta["ISBN"] = "".join(ch for ch in str(isbn) if ch.isdigit())
     return meta
 
@@ -410,6 +389,45 @@ def get_recommendations_by_author(author: str) -> list:
     except Exception:
         pass
     return []
+
+# ---------- Recommendation helpers ----------
+def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
+    """Convert a Google Books volumeInfo dict to our meta schema."""
+    isbn13 = ""
+    for ident in vi.get("industryIdentifiers", []) or []:
+        if ident.get("type") == "ISBN_13" and ident.get("identifier"):
+            isbn13 = "".join(ch for ch in ident["identifier"] if ch.isdigit())
+            break
+    if not isbn13:
+        isbn13 = "".join(ch for ch in str(isbn_hint) if ch.isdigit())
+
+    authors = vi.get("authors") or []
+    author = authors[0] if authors else ""
+    links = vi.get("imageLinks", {}) or {}
+    thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
+    if thumb.startswith("http://"):
+        thumb = thumb.replace("http://", "https://")
+    cats = vi.get("categories") or []
+
+    return {
+        "ISBN": isbn13,
+        "Title": vi.get("title", "") or "",
+        "Author": author,
+        "Genre": ", ".join(cats) if cats else "",
+        "Language": (vi.get("language") or "").upper(),
+        "Thumbnail": thumb,
+        "Description": (vi.get("description") or "").strip(),
+        "Rating": str(vi.get("averageRating", "")) if vi.get("averageRating") is not None else "",
+        "PublishedDate": vi.get("publishedDate", "") or "",
+    }
+
+def _existing_keys(df: pd.DataFrame) -> tuple[set[str], set[tuple[str, str]]]:
+    """Build quick lookups to avoid recommending what you already have."""
+    if df is None or df.empty:
+        return set(), set()
+    isbns = set("".join(ch for ch in str(x).replace("'", "") if ch.isdigit()) for x in df.get("ISBN", []) if pd.notna(x))
+    ta = set((str(t).strip().lower(), str(a).strip().lower()) for t, a in zip(df.get("Title", []), df.get("Author", [])))
+    return isbns, ta
 
 # ---------- Barcode helpers ----------
 def _extract_isbn_from_raw(raw: str) -> str:
@@ -431,7 +449,6 @@ st.title("Misiddons Book Database")
 # — Add Book Form —
 with st.expander("✍️ Add a New Book", expanded=False):
     with st.form("entry_form"):
-        # Pre-populate form fields with scanned data if available
         cols = st.columns(5)
         title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
         author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
@@ -444,13 +461,11 @@ with st.expander("✍️ Add a New Book", expanded=False):
                 try:
                     scan_meta = st.session_state.get("last_scan_meta", {})
                     rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
-                    # Always bring in scanned metadata if present (no key-skip condition)
                     for k in ["Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
                         if scan_meta.get(k):
                             rec[k] = scan_meta[k]
                     append_record(choice, rec)
                     st.success(f"Added '{title}' to {choice}.")
-                    # Clear session state for next entry
                     st.session_state["scan_isbn"] = ""
                     st.session_state["scan_title"] = ""
                     st.session_state["scan_author"] = ""
@@ -487,7 +502,6 @@ if zbar_decode:
                 if not meta or not meta.get("Title"):
                     st.error("Couldn't fetch details from Google/OpenLibrary. Check the ISBN or try again.")
                 else:
-                    # Update session state for the manual entry form
                     st.session_state["scan_isbn"] = meta.get("ISBN", "")
                     st.session_state["scan_title"] = meta.get("Title", "")
                     st.session_state["scan_author"] = meta.get("Author", "")
@@ -505,11 +519,10 @@ if zbar_decode:
                         st.write(f"**Author:** {meta.get('Author','Unknown')}")
                         st.write(f"**Published Date:** {meta.get('PublishedDate','Unknown')}")
                         if meta.get("Rating"):
-                            st.write(f"**Rating:** {meta.get('Rating')}")
+                            st.write(f"**Rating:** {meta["Rating"]}")
                         if meta.get("Language"):
-                            st.write(f"**Language:** {meta.get("Language")}")
+                            st.write(f"**Language:** {meta["Language"]}")
 
-                    # Description with 'Read more' logic
                     full_desc = meta.get("Description", "")
                     if full_desc:
                         lines = full_desc.split('\n')
@@ -572,30 +585,85 @@ with tabs[1]:
 
 with tabs[2]:
     st.header("Recommendations")
-    library_df = load_data("Library")
-    if not library_df.empty and "Author" in library_df.columns:
-        authors = library_df["Author"].dropna().unique()
-        selected_author = st.selectbox("Find books by authors you've read:", authors)
-        if selected_author:
-            recommendations = get_recommendations_by_author(selected_author)
-            if recommendations:
-                for item in recommendations:
-                    vi = item.get("volumeInfo", {})
-                    cols = st.columns([1, 4])
-                    with cols[0]:
-                        thumb = vi.get("imageLinks", {}).get("thumbnail")
-                        if thumb:
-                            st.image(thumb, width=100)
-                    with cols[1]:
-                        st.subheader(vi.get("title", "No Title"))
-                        st.write(f"**Author(s):** {', '.join(vi.get('authors', ['N/A']))}")
-                        st.write(f"**Published:** {vi.get('publishedDate', 'N/A')}")
-                        st.caption(vi.get("description", 'No description available.'))
-                        st.markdown("---")
-            else:
-                st.info("No recommendations found.")
+
+    library_df  = load_data("Library")
+    wishlist_df = load_data("Wishlist")
+
+    authors_lib  = library_df["Author"].dropna().tolist() if (library_df is not None and "Author" in library_df.columns) else []
+    authors_wish = wishlist_df["Author"].dropna().tolist() if (wishlist_df is not None and "Author" in wishlist_df.columns) else []
+    seed_authors = sorted({a for a in authors_lib + authors_wish if str(a).strip()})
+
+    if not seed_authors:
+        st.info("Add a few books (Library or Wishlist) to get tailored recommendations.")
     else:
-        st.info("Read some books to get recommendations!")
+        have_isbns_lib, have_ta_lib = _existing_keys(library_df)
+        have_isbns_wl,  have_ta_wl  = _existing_keys(wishlist_df)
+        have_isbns = have_isbns_lib | have_isbns_wl
+        have_ta    = have_ta_lib | have_ta_wl
+
+        candidates = []
+        seen_ta = set()
+
+        for author in seed_authors:
+            items = get_recommendations_by_author(author) or []
+            for item in items:
+                vi = (item or {}).get("volumeInfo", {}) or {}
+                meta = _vi_to_meta("", vi)
+
+                ta_key = (meta["Title"].strip().lower(), meta["Author"].strip().lower())
+                isbn_key = "".join(ch for ch in str(meta["ISBN"]).replace("'", "") if ch.isdigit())
+
+                if (isbn_key and isbn_key in have_isbns) or (ta_key in have_ta) or (ta_key in seen_ta):
+                    continue
+                if not meta["Title"] or not meta["Author"]:
+                    continue
+
+                candidates.append(meta)
+                seen_ta.add(ta_key)
+                if len(candidates) >= 4:
+                    break
+            if len(candidates) >= 4:
+                break
+
+        if not candidates:
+            st.info("No fresh recommendations right now (everything I found is already in your Library/Wishlist).")
+        else:
+            for i, meta in enumerate(candidates, 1):
+                st.markdown(f"**#{i}**")
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    if meta.get("Thumbnail"):
+                        st.image(meta["Thumbnail"], width=110)
+                with cols[1]:
+                    st.subheader(meta.get("Title", "No Title"))
+                    st.write(f"**Author:** {meta.get('Author','Unknown')}")
+                    if meta.get("PublishedDate"):
+                        st.write(f"**Published:** {meta['PublishedDate']}")
+                    if meta.get("Rating"):
+                        st.write(f"**Rating:** {meta['Rating']}")
+
+                    desc = meta.get("Description", "")
+                    if desc:
+                        st.caption(desc if len(desc) < 280 else (desc[:280].rstrip() + "…"))
+
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("➕ Add to Library", key=f"rec_add_lib_{i}", use_container_width=True):
+                            try:
+                                append_record("Library", meta)
+                                st.success("Added to Library ✔")
+                                if _rerun: _rerun()
+                            except Exception as e:
+                                st.error(f"Failed to add: {e}")
+                    with b2:
+                        if st.button("🧾 Add to Wishlist", key=f"rec_add_wl_{i}", use_container_width=True):
+                            try:
+                                append_record("Wishlist", meta)
+                                st.success("Added to Wishlist ✔")
+                                if _rerun: _rerun()
+                            except Exception as e:
+                                st.error(f"Failed to add: {e}")
+                st.markdown("---")
 
 # ---- Diagnostics (safe to show) ----
 with st.expander("Diagnostics – help me if it still fails"):
