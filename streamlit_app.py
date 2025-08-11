@@ -17,7 +17,6 @@ from google.oauth2.service_account import Credentials
 from urllib.parse import quote
 from PIL import Image
 from gspread.exceptions import APIError, WorksheetNotFound
-from bs4 import BeautifulSoup # Added for web scraping
 
 # Optional barcode support
 try:
@@ -346,57 +345,6 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         }
     except Exception:
         return {}
-        
-def get_book_details_web_scrape(title: str, author: str) -> dict:
-    """
-    Web scraping fallback to get cover and description.
-    This is a fragile method and may break if the target site's HTML changes.
-    """
-    if not title or not author:
-        return {}
-
-    try:
-        search_query = f"{title} {author}"
-        search_url = f"https://www.goodreads.com/search?q={quote(search_query)}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        
-        st.info(f"Trying to web scrape for missing details using search query: '{search_query}'")
-        
-        # Step 1: Search for the book
-        search_response = requests.get(search_url, headers=headers, timeout=12)
-        search_response.raise_for_status()
-        search_soup = BeautifulSoup(search_response.text, 'html.parser')
-        
-        # Find the first book link
-        book_link_element = search_soup.find('a', {'class': 'bookTitle'})
-        if not book_link_element:
-            return {}
-            
-        book_url = f"https://www.goodreads.com{book_link_element['href']}"
-        
-        # Step 2: Navigate to the book's page and scrape details
-        book_response = requests.get(book_url, headers=headers, timeout=12)
-        book_response.raise_for_status()
-        book_soup = BeautifulSoup(book_response.text, 'html.parser')
-        
-        scraped_meta = {}
-        
-        # Scrape Description
-        description_div = book_soup.find('div', {'id': 'description'})
-        if description_div:
-            scraped_meta["Description"] = description_div.find('span', style="display:none").text.strip()
-            
-        # Scrape Cover Image
-        cover_img = book_soup.find('img', {'id': 'coverImage'})
-        if cover_img and cover_img.get('src'):
-            scraped_meta["Thumbnail"] = cover_img['src']
-            
-        return scraped_meta
-        
-    except Exception as e:
-        st.warning(f"Web scraping failed: {e}")
-        return {}
-
 
 def get_goodreads_rating_placeholder(isbn: str) -> str:
     """
@@ -412,32 +360,29 @@ def get_goodreads_rating_placeholder(isbn: str) -> str:
 def get_book_metadata(isbn: str) -> dict:
     """Merge details from multiple sources for a robust result."""
     
-    # Fetch details from Google Books first
+    # Fetch details from both sources once
     google_meta = get_book_details_google(isbn)
+    openlibrary_meta = get_book_details_openlibrary(isbn)
+    
+    # Initialize meta with data from Google Books
     meta = google_meta.copy()
 
     # Fallback to OpenLibrary if Google Books is missing key info
     if not meta.get("Title"):
         st.info("Google Books search failed. Falling back to OpenLibrary for a complete search.")
-        meta = get_book_details_openlibrary(isbn)
+        meta = openlibrary_meta.copy()
 
     # If the description is still missing after the initial search, try OpenLibrary again
     # to fill in the gaps. This handles cases where Google has a title but no description.
-    if not meta.get("Description"):
+    if not meta.get("Description") and openlibrary_meta.get("Description"):
         st.info("Description missing from Google Books. Using OpenLibrary data.")
-        ol_meta = get_book_details_openlibrary(isbn)
-        # Merge OpenLibrary data, but prioritize existing fields from the first source
-        # to prevent overwriting potentially more accurate data.
-        meta = {**ol_meta, **meta}
-
-    # As a final fallback for description and thumbnail, try web scraping
-    if (not meta.get("Description") or not meta.get("Thumbnail")) and meta.get("Title") and meta.get("Author"):
-        scraped_meta = get_book_details_web_scrape(meta["Title"], meta["Author"])
-        if scraped_meta:
-            # Only update if the scraped data is not empty
-            meta["Description"] = meta.get("Description") or scraped_meta.get("Description", "")
-            meta["Thumbnail"] = meta.get("Thumbnail") or scraped_meta.get("Thumbnail", "")
-
+        meta["Description"] = openlibrary_meta["Description"]
+    
+    # Fallback for other fields if they are missing
+    for key in ["Title", "Author", "Genre", "Language", "Thumbnail", "PublishedDate"]:
+        if not meta.get(key) and openlibrary_meta.get(key):
+            meta[key] = openlibrary_meta[key]
+    
     # Ensure all required keys exist, even if empty
     required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
     for k in required_keys:
