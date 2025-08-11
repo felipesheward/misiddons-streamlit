@@ -359,34 +359,35 @@ def get_goodreads_rating_placeholder(isbn: str) -> str:
 
 def get_book_metadata(isbn: str) -> dict:
     """Merge details from multiple sources for a robust result."""
-    meta = get_book_details_google(isbn)
     
-    # Check if Google Books returned a valid title. If not, fallback to OpenLibrary.
-    if not meta.get("Title"):
-        st.info("Google Books search failed. Falling back to OpenLibrary for a complete search.")
-        meta = get_book_details_openlibrary(isbn)
+    # Fetch details from both sources once
+    google_meta = get_book_details_google(isbn)
+    openlibrary_meta = get_book_details_openlibrary(isbn)
+    
+    # Initialize meta with data from Google Books
+    meta = google_meta.copy()
 
-    # If the description is still missing after the initial search, try to get it from OpenLibrary
-    # and merge the results. This handles cases where Google has a title but no description.
+    # Fallback to OpenLibrary for missing fields
     if not meta.get("Description"):
-        st.info("Description missing. Attempting to get it from OpenLibrary...")
-        ol_meta = get_book_details_openlibrary(isbn)
-        # Merge OpenLibrary data, but prioritize existing fields from the first source
-        # to prevent overwriting potentially more accurate data.
-        meta = {**ol_meta, **meta}
-
+        st.info("Description missing from Google Books. Using OpenLibrary data.")
+        meta["Description"] = openlibrary_meta.get("Description", "")
+    
+    # Fallback for other fields if they are missing
+    for key in ["Title", "Author", "Genre", "Language", "Thumbnail", "PublishedDate"]:
+        if not meta.get(key) and openlibrary_meta.get(key):
+            meta[key] = openlibrary_meta[key]
+    
     # Ensure all required keys exist, even if empty
     required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
     for k in required_keys:
         meta.setdefault(k, "")
-    
+
     # Re-fetch and merge ratings from all sources
     ratings_parts = []
     
     # Add Google Books rating
-    g_rating = get_book_details_google(isbn).get("Rating")
-    if g_rating:
-        ratings_parts.append(f"GB:{g_rating}")
+    if google_meta.get("Rating"):
+        ratings_parts.append(f"GB:{google_meta['Rating']}")
 
     # Add OpenLibrary rating
     ol_avg, ol_count = get_openlibrary_rating(isbn)
