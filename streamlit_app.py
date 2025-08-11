@@ -10,6 +10,8 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 import pandas as pd
 import requests
 import streamlit as st
@@ -26,28 +28,25 @@ except Exception:
     zbar_decode = None
 
 # ---------- CONFIG ----------
-DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
+DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6wzooh7f8cDnIRl0Q7s"
 SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
 GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
 GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
-
-# For Streamlit >1.30 the proper call is st.rerun
 _rerun = getattr(st, "rerun", getattr(st, "experimental_rerun", None))
 
 # ---------- Small utils ----------
-def _first_nonempty(*vals: str) -> str:
-    for v in vals:
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+def _clean_text(s: str) -> str:
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFC", str(s))
+    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)  # zero-width chars
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def _split_authors_for_seeds(author_field: str) -> list[str]:
-    """
-    Split an Author cell into individual names for seeds.
-    Handles 'A, B', 'A & B', 'A and B'.
-    """
+    """Split an Author cell into individual names for seeds. Handles 'A, B', 'A & B', 'A and B'."""
     if not author_field:
         return []
     s = str(author_field)
@@ -213,14 +212,13 @@ def append_record(tab: str, record: dict) -> None:
 # ---------- Metadata fetchers ----------
 @st.cache_data(ttl=86400)
 def get_book_details_google(isbn: str) -> dict:
-    """Google Books metadata. Keep FULL author list joined for reliability."""
+    """Google Books metadata. Keep FULL author list joined + Unicode clean."""
     if not isbn:
         return {}
     try:
         params = {"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1}
         if GOOGLE_BOOKS_KEY:
             params["key"] = GOOGLE_BOOKS_KEY
-
         r = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
             params=params,
@@ -232,29 +230,28 @@ def get_book_details_google(isbn: str) -> dict:
         if not items:
             return {}
 
-        info = items[0].get("volumeInfo", {}) or {}
-        desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet") or ""
-
-        # Authors: keep the full list joined (split later for seeds)
-        authors_list = [a for a in (info.get("authors") or []) if a and a.strip()]
-        author_str = ", ".join(authors_list) if authors_list else ""
-
+        info  = items[0].get("volumeInfo", {}) or {}
+        desc  = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet") or ""
         links = info.get("imageLinks", {}) or {}
         thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
         if thumb.startswith("http://"):
             thumb = thumb.replace("http://", "https://")
 
+        # Authors: keep the full list joined (split later for seeds), cleaned
+        authors_list = [_clean_text(a) for a in (info.get("authors") or []) if _clean_text(a)]
+        author_str   = ", ".join(authors_list) if authors_list else ""
+
         cats = info.get("categories") or []
         return {
             "ISBN": isbn,
-            "Title": info.get("title", "") or "",
-            "Author": author_str,  # full list joined
-            "Genre": ", ".join(cats) if cats else "",
+            "Title": _clean_text(info.get("title", "")),
+            "Author": author_str,
+            "Genre": _clean_text(", ".join(cats) if cats else ""),
             "Language": (info.get("language") or "").upper(),
             "Thumbnail": thumb,
-            "Description": desc.strip(),
+            "Description": _clean_text(desc),
             "Rating": str(info.get("averageRating", "")) if info.get("averageRating") is not None else "",
-            "PublishedDate": info.get("publishedDate", "") or "",
+            "PublishedDate": _clean_text(info.get("publishedDate", "")),
         }
     except Exception:
         return {}
@@ -288,7 +285,7 @@ def get_openlibrary_rating(isbn: str):
 
 @st.cache_data(ttl=86400)
 def get_book_details_openlibrary(isbn: str) -> dict:
-    """OpenLibrary metadata with solid author resolution and robust fallbacks."""
+    """OpenLibrary metadata with solid author resolution (no translators in Author), and robust fallbacks."""
     try:
         # Rich 'data' endpoint
         r = requests.get(
@@ -300,57 +297,41 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         r.raise_for_status()
         data = r.json().get(f"ISBN:{isbn}", {}) or {}
 
-        # Authors from 'data'
-        data_authors = [a.get("name", "") for a in (data.get("authors") or []) if isinstance(a, dict)]
-        author_from_data = ", ".join([a for a in data_authors if a.strip()])
-
-        subjects = ", ".join(s.get("name", "") for s in data.get("subjects", []) if s) or ""
-        cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
-        desc = data.get("description", "")
-        if isinstance(desc, dict):
-            desc = desc.get("value", "")
-
-        # Secondary: /isbn JSON (works, authors keys, publish info)
         bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json") or {}
 
-        # Resolve authors via /authors/* if 'data' lacked names
-        author_names = []
-        if author_from_data:
-            author_names = [a.strip() for a in author_from_data.split(",") if a.strip()]
-        else:
+        # Authors from 'data'
+        data_authors = [a.get("name","") for a in (data.get("authors") or []) if isinstance(a, dict)]
+        author_names = [_clean_text(a) for a in data_authors if _clean_text(a)]
+
+        # If not present, resolve /authors/*
+        if not author_names:
             for a in (bj.get("authors") or []):
                 key = a.get("key")
                 if not key:
                     continue
                 aj = _ol_fetch_json(f"https://openlibrary.org{key}.json") or {}
-                nm = aj.get("name") or aj.get("personal_name") or ""
-                if nm and nm.strip():
-                    author_names.append(nm.strip())
-            if not author_names:
-                by_stmt = data.get("by_statement") or bj.get("by_statement") or ""
-                if by_stmt:
-                    by_stmt = by_stmt.strip()
-                    if by_stmt.lower().startswith("by "):
-                        by_stmt = by_stmt[3:].strip()
-                    if by_stmt:
-                        author_names = [by_stmt]
+                nm = _clean_text(aj.get("name") or aj.get("personal_name") or "")
+                if nm:
+                    author_names.append(nm)
 
-        # Works description fallback
+        # Description
+        desc = data.get("description","")
+        if isinstance(desc, dict):
+            desc = desc.get("value","")
         if not desc:
             works = bj.get("works") or []
             if works and works[0].get("key"):
-                wk = works[0]["key"]
-                wj = _ol_fetch_json(f"https://openlibrary.org{wk}.json") or {}
-                d = wj.get("description", "")
-                if isinstance(d, dict):
-                    d = d.get("value", "")
+                wj = _ol_fetch_json(f"https://openlibrary.org{works[0]['key']}.json") or {}
+                d  = wj.get("description","")
+                if isinstance(d, dict): d = d.get("value","")
                 desc = d or desc
 
+        # Cover
+        cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
         if not cover:
             if bj.get("covers"):
                 try:
-                    cover_id = bj["covers"][0]
-                    cover = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
+                    cover = f"https://covers.openlibrary.org/b/id/{bj['covers'][0]}-L.jpg"
                 except Exception:
                     pass
             if not cover:
@@ -359,29 +340,32 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         # Language
         lang = ""
         try:
-            lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
+            lang = (data.get("languages",[{}])[0].get("key","").split("/")[-1] or "").upper()
         except Exception:
             pass
         if not lang:
-            try:
-                langs = bj.get("languages", [])
-                if langs:
-                    lang = langs[0].get("key", "").split("/")[-1].upper()
-            except Exception:
-                lang = ""
+            langs = bj.get("languages", [])
+            if langs:
+                lang = (langs[0].get("key","").split("/")[-1] or "").upper()
 
-        published_date = data.get("publish_date", "") or bj.get("publish_date", "") or ""
-        title = data.get("title", "") or bj.get("title", "") or ""
+        # Other fields
+        subjects = ", ".join([_clean_text(s.get("name","")) for s in data.get("subjects",[]) if s]) or ""
+        title    = _clean_text(data.get("title","") or bj.get("title",""))
+        pubdate  = _clean_text(data.get("publish_date","") or bj.get("publish_date",""))
+        desc     = _clean_text(desc)
+
+        # Compose Author string: strictly authors only (no translators)
+        author_str = ", ".join(author_names)
 
         return {
             "ISBN": isbn,
             "Title": title,
-            "Author": ", ".join(author_names),  # full list joined
-            "Genre": subjects,
+            "Author": author_str,
+            "Genre": _clean_text(subjects),
             "Language": lang,
             "Thumbnail": cover,
-            "Description": (desc or "").strip(),
-            "PublishedDate": published_date,
+            "Description": desc,
+            "PublishedDate": pubdate,
         }
     except Exception:
         return {}
@@ -391,7 +375,7 @@ def get_goodreads_rating_placeholder(isbn: str) -> str:
     return "GR:unavailable"
 
 def get_book_metadata(isbn: str) -> dict:
-    """Merge details from Google + OpenLibrary, prefer non-empty fields."""
+    """Merge details from Google + OpenLibrary, prefer non-empty fields, clean text."""
     google_meta = get_book_details_google(isbn)
     ol_meta     = get_book_details_openlibrary(isbn)
 
@@ -420,8 +404,12 @@ def get_book_metadata(isbn: str) -> dict:
     ratings_parts.append(get_goodreads_rating_placeholder(isbn))
     meta["Rating"] = " | ".join([p for p in ratings_parts if p])
 
-    # Normalize ISBN
+    # Normalize ISBN and CLEAN every string
     meta["ISBN"] = "".join(ch for ch in str(isbn) if ch.isdigit())
+    for k, v in list(meta.items()):
+        if isinstance(v, str):
+            meta[k] = _clean_text(v)
+
     return meta
 
 @st.cache_data(ttl=86400)
@@ -498,7 +486,7 @@ def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
         isbn13 = "".join(ch for ch in str(isbn_hint) if ch.isdigit())
 
     authors = vi.get("authors") or []
-    author = ", ".join([a for a in authors if a and a.strip()])  # keep list joined
+    author = ", ".join([_clean_text(a) for a in authors if _clean_text(a)])  # keep list joined
     links = vi.get("imageLinks", {}) or {}
     thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
     if thumb.startswith("http://"):
@@ -507,14 +495,14 @@ def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
 
     return {
         "ISBN": isbn13,
-        "Title": vi.get("title", "") or "",
+        "Title": _clean_text(vi.get("title", "") or ""),
         "Author": author,
-        "Genre": ", ".join(cats) if cats else "",
+        "Genre": _clean_text(", ".join(cats) if cats else ""),
         "Language": (vi.get("language") or "").upper(),
         "Thumbnail": thumb,
-        "Description": (vi.get("description") or "").strip(),
+        "Description": _clean_text(vi.get("description") or ""),
         "Rating": str(vi.get("averageRating", "")) if vi.get("averageRating") is not None else "",
-        "PublishedDate": vi.get("publishedDate", "") or "",
+        "PublishedDate": _clean_text(vi.get("publishedDate", "") or ""),
     }
 
 # ---------- Barcode helpers ----------
@@ -785,21 +773,5 @@ with st.expander("Diagnostics – help me if it still fails"):
                 st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
         except Exception as e:
             st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
-
-        # Author completeness diagnostic
-        lib = load_data("Library")
-        wl  = load_data("Wishlist")
-        def _missing_auth(df):
-            if df is None or df.empty:
-                return 0, 0
-            colmap = {c.casefold(): c for c in df.columns}
-            ac = colmap.get("author")
-            if not ac:
-                return len(df), len(df)
-            miss = (df[ac].astype(str).str.strip() == "") | df[ac].isna()
-            return int(miss.sum()), int(len(df))
-        m_lib, n_lib = _missing_auth(lib)
-        m_wl,  n_wl  = _missing_auth(wl)
-        st.write(f"Missing authors — Library: {m_lib}/{n_lib}, Wishlist: {m_wl}/{n_wl}")
     except Exception as e:
         st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
