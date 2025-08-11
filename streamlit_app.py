@@ -3,7 +3,7 @@
 """
 Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
-- Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
+- Scan barcodes from a photo to auto-fill metadata (title, author(s), cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
 - Recommends up to 4 books you DON'T already have (based on Library + Wishlist authors & subjects)
@@ -35,6 +35,26 @@ st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
 # For Streamlit >1.30 the proper call is st.rerun
 _rerun = getattr(st, "rerun", getattr(st, "experimental_rerun", None))
+
+# ---------- Small utils ----------
+def _first_nonempty(*vals: str) -> str:
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _split_authors_for_seeds(author_field: str) -> list[str]:
+    """
+    Split an Author cell into individual names for seeds.
+    Handles 'A, B', 'A & B', 'A and B'.
+    """
+    if not author_field:
+        return []
+    s = str(author_field)
+    for token in [" & ", " and "]:
+        s = s.replace(token, ", ")
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return [p for p in parts if len(p) >= 2]
 
 # ---------- Google Sheets helpers ----------
 @st.cache_resource
@@ -193,14 +213,11 @@ def append_record(tab: str, record: dict) -> None:
 # ---------- Metadata fetchers ----------
 @st.cache_data(ttl=86400)
 def get_book_details_google(isbn: str) -> dict:
+    """Google Books metadata. Keep FULL author list joined for reliability."""
     if not isbn:
         return {}
     try:
-        params = {
-            "q": f"isbn:{isbn}",
-            "printType": "books",
-            "maxResults": 1,
-        }
+        params = {"q": f"isbn:{isbn}", "printType": "books", "maxResults": 1}
         if GOOGLE_BOOKS_KEY:
             params["key"] = GOOGLE_BOOKS_KEY
 
@@ -217,17 +234,21 @@ def get_book_details_google(isbn: str) -> dict:
 
         info = items[0].get("volumeInfo", {}) or {}
         desc = info.get("description") or items[0].get("searchInfo", {}).get("textSnippet") or ""
+
+        # Authors: keep the full list joined (split later for seeds)
+        authors_list = [a for a in (info.get("authors") or []) if a and a.strip()]
+        author_str = ", ".join(authors_list) if authors_list else ""
+
         links = info.get("imageLinks", {}) or {}
         thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
         if thumb.startswith("http://"):
             thumb = thumb.replace("http://", "https://")
-        authors = info.get("authors") or []
-        author = authors[0] if authors else ""
+
         cats = info.get("categories") or []
         return {
             "ISBN": isbn,
             "Title": info.get("title", "") or "",
-            "Author": author,
+            "Author": author_str,  # full list joined
             "Genre": ", ".join(cats) if cats else "",
             "Language": (info.get("language") or "").upper(),
             "Thumbnail": thumb,
@@ -252,25 +273,24 @@ def _ol_fetch_json(url: str) -> dict:
 def get_openlibrary_rating(isbn: str):
     """Return (avg, count) rating for the book's first work on Open Library, if any."""
     try:
-        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json") or {}
         works = bj.get("works") or []
         if not works:
             return None, None
         work_key = works[0].get("key")
         if not work_key:
             return None, None
-        rj = _ol_fetch_json(f"https://openlibrary.org{work_key}/ratings.json")
+        rj = _ol_fetch_json(f"https://openlibrary.org{work_key}/ratings.json") or {}
         summary = rj.get("summary", {}) if isinstance(rj, dict) else {}
-        avg = summary.get("average")
-        count = summary.get("count")
-        return (avg, count)
+        return (summary.get("average"), summary.get("count"))
     except Exception:
         return None, None
 
 @st.cache_data(ttl=86400)
 def get_book_details_openlibrary(isbn: str) -> dict:
-    """Robust OpenLibrary metadata with description & cover fallbacks via works/details endpoints."""
+    """OpenLibrary metadata with solid author resolution and robust fallbacks."""
     try:
+        # Rich 'data' endpoint
         r = requests.get(
             "https://openlibrary.org/api/books",
             params={"bibkeys": f"ISBN:{isbn}", "jscmd": "data", "format": "json"},
@@ -280,21 +300,47 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         r.raise_for_status()
         data = r.json().get(f"ISBN:{isbn}", {}) or {}
 
-        authors_list = data.get("authors") or []
-        author = authors_list[0]["name"] if authors_list else ""
+        # Authors from 'data'
+        data_authors = [a.get("name", "") for a in (data.get("authors") or []) if isinstance(a, dict)]
+        author_from_data = ", ".join([a for a in data_authors if a.strip()])
+
         subjects = ", ".join(s.get("name", "") for s in data.get("subjects", []) if s) or ""
         cover = (data.get("cover") or {}).get("large") or (data.get("cover") or {}).get("medium") or ""
-
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
 
-        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json")
+        # Secondary: /isbn JSON (works, authors keys, publish info)
+        bj = _ol_fetch_json(f"https://openlibrary.org/isbn/{isbn}.json") or {}
+
+        # Resolve authors via /authors/* if 'data' lacked names
+        author_names = []
+        if author_from_data:
+            author_names = [a.strip() for a in author_from_data.split(",") if a.strip()]
+        else:
+            for a in (bj.get("authors") or []):
+                key = a.get("key")
+                if not key:
+                    continue
+                aj = _ol_fetch_json(f"https://openlibrary.org{key}.json") or {}
+                nm = aj.get("name") or aj.get("personal_name") or ""
+                if nm and nm.strip():
+                    author_names.append(nm.strip())
+            if not author_names:
+                by_stmt = data.get("by_statement") or bj.get("by_statement") or ""
+                if by_stmt:
+                    by_stmt = by_stmt.strip()
+                    if by_stmt.lower().startswith("by "):
+                        by_stmt = by_stmt[3:].strip()
+                    if by_stmt:
+                        author_names = [by_stmt]
+
+        # Works description fallback
         if not desc:
             works = bj.get("works") or []
             if works and works[0].get("key"):
                 wk = works[0]["key"]
-                wj = _ol_fetch_json(f"https://openlibrary.org{wk}.json")
+                wj = _ol_fetch_json(f"https://openlibrary.org{wk}.json") or {}
                 d = wj.get("description", "")
                 if isinstance(d, dict):
                     d = d.get("value", "")
@@ -310,6 +356,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
             if not cover:
                 cover = f"https://covers.openlibrary.org/b/ISBN/{isbn}-L.jpg"
 
+        # Language
         lang = ""
         try:
             lang = (data.get("languages", [{}])[0].get("key", "").split("/")[-1] or "").upper()
@@ -329,7 +376,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
         return {
             "ISBN": isbn,
             "Title": title,
-            "Author": author,
+            "Author": ", ".join(author_names),  # full list joined
             "Genre": subjects,
             "Language": lang,
             "Thumbnail": cover,
@@ -344,20 +391,23 @@ def get_goodreads_rating_placeholder(isbn: str) -> str:
     return "GR:unavailable"
 
 def get_book_metadata(isbn: str) -> dict:
-    """Merge details from multiple sources for a robust result."""
+    """Merge details from Google + OpenLibrary, prefer non-empty fields."""
     google_meta = get_book_details_google(isbn)
-    openlibrary_meta = get_book_details_openlibrary(isbn)
+    ol_meta     = get_book_details_openlibrary(isbn)
 
-    meta = google_meta.copy() if google_meta else openlibrary_meta.copy()
+    meta = google_meta.copy() if google_meta else ol_meta.copy()
 
+    # Fill empty fields from OL
     for key in ["Title","Author","Genre","Language","Thumbnail","Description","PublishedDate"]:
-        if not meta.get(key) and openlibrary_meta.get(key):
-            meta[key] = openlibrary_meta[key]
+        if not meta.get(key) and ol_meta.get(key):
+            meta[key] = ol_meta[key]
 
-    required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
-    for k in required_keys:
+    # Ensure keys exist
+    required = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
+    for k in required:
         meta.setdefault(k, "")
 
+    # Ratings
     ratings_parts = []
     if google_meta.get("Rating"):
         ratings_parts.append(f"GB:{google_meta['Rating']}")
@@ -370,6 +420,7 @@ def get_book_metadata(isbn: str) -> dict:
     ratings_parts.append(get_goodreads_rating_placeholder(isbn))
     meta["Rating"] = " | ".join([p for p in ratings_parts if p])
 
+    # Normalize ISBN
     meta["ISBN"] = "".join(ch for ch in str(isbn) if ch.isdigit())
     return meta
 
@@ -447,7 +498,7 @@ def _vi_to_meta(isbn_hint: str, vi: dict) -> dict:
         isbn13 = "".join(ch for ch in str(isbn_hint) if ch.isdigit())
 
     authors = vi.get("authors") or []
-    author = authors[0] if authors else ""
+    author = ", ".join([a for a in authors if a and a.strip()])  # keep list joined
     links = vi.get("imageLinks", {}) or {}
     thumb = links.get("thumbnail") or links.get("smallThumbnail") or ""
     if thumb.startswith("http://"):
@@ -553,7 +604,7 @@ if zbar_decode:
                             st.image(meta["Thumbnail"], caption=meta.get("Title",""), width=150)
                     with cols[1]:
                         st.subheader(meta.get("Title","Unknown Title"))
-                        st.write(f"**Author:** {meta.get('Author','Unknown')}")
+                        st.write(f"**Author(s):** {meta.get('Author','Unknown')}")
                         st.write(f"**Published Date:** {meta.get('PublishedDate','Unknown')}")
                         if meta.get("Rating"):
                             st.write(f"**Rating:** {meta['Rating']}")
@@ -626,12 +677,15 @@ with tabs[2]:
     library_df  = load_data("Library")
     wishlist_df = load_data("Wishlist")
 
-    # Build seeds from BOTH tabs
+    # Build seeds from BOTH tabs (robust author parsing)
     authors = []
-    if library_df is not None and not library_df.empty and "Author" in library_df.columns:
-        authors.extend(library_df["Author"].dropna().astype(str).tolist())
-    if wishlist_df is not None and not wishlist_df.empty and "Author" in wishlist_df.columns:
-        authors.extend(wishlist_df["Author"].dropna().astype(str).tolist())
+    for df in (library_df, wishlist_df):
+        if df is not None and not df.empty:
+            colmap = {c.casefold(): c for c in df.columns}
+            author_col = colmap.get("author")
+            if author_col:
+                for cell in df[author_col].dropna().astype(str).tolist():
+                    authors.extend(_split_authors_for_seeds(cell))
     top_authors = _top_n(authors, n=5)
 
     subjects = _extract_subjects(library_df) + _extract_subjects(wishlist_df)
@@ -690,7 +744,7 @@ with tabs[2]:
                         st.image(meta["Thumbnail"], width=110)
                 with cols[1]:
                     st.subheader(meta.get("Title", "No Title"))
-                    st.write(f"**Author:** {meta.get('Author','Unknown')}")
+                    st.write(f"**Author(s):** {meta.get('Author','Unknown')}")
                     if meta.get("PublishedDate"):
                         st.write(f"**Published:** {meta['PublishedDate']}")
                     if meta.get("Rating"):
@@ -731,5 +785,21 @@ with st.expander("Diagnostics – help me if it still fails"):
                 st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
         except Exception as e:
             st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
+
+        # Author completeness diagnostic
+        lib = load_data("Library")
+        wl  = load_data("Wishlist")
+        def _missing_auth(df):
+            if df is None or df.empty:
+                return 0, 0
+            colmap = {c.casefold(): c for c in df.columns}
+            ac = colmap.get("author")
+            if not ac:
+                return len(df), len(df)
+            miss = (df[ac].astype(str).str.strip() == "") | df[ac].isna()
+            return int(miss.sum()), int(len(df))
+        m_lib, n_lib = _missing_auth(lib)
+        m_wl,  n_wl  = _missing_auth(wl)
+        st.write(f"Missing authors — Library: {m_lib}/{n_lib}, Wishlist: {m_wl}/{n_wl}")
     except Exception as e:
         st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
