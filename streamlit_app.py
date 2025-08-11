@@ -11,7 +11,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
     - Improved feedback messages
     - Recommendations filter out owned books
     - More readable DataFrame display
-    - Interactive genre distribution chart
+    - Authors' names with special characters are now handled correctly
 """
 from __future__ import annotations
 
@@ -403,6 +403,7 @@ def get_recommendations_by_author(author: str) -> list:
     if not author:
         return []
     try:
+        # Pass the author's name as-is for the API search to maintain special characters
         r = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
             params={"q": f"inauthor:{quote(author)}", "maxResults": 8},
@@ -571,15 +572,8 @@ with tabs[0]:
         lib_df_display = library_df.copy()
         if search_lib:
             lib_df_display = lib_df_display[
-                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False).any(), axis=1)
+                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
             ]
-        
-        # Display genre distribution chart
-        if "Genre" in lib_df_display.columns and not lib_df_display.empty:
-            genre_counts = lib_df_display["Genre"].str.split(", ").explode().str.strip().value_counts()
-            if not genre_counts.empty:
-                with st.expander("Show Genre Distribution Chart"):
-                    st.bar_chart(genre_counts)
         
         st.dataframe(
             lib_df_display, 
@@ -602,7 +596,7 @@ with tabs[1]:
         wish_df_display = wishlist_df.copy()
         if search_wish:
             wish_df_display = wish_df_display[
-                wish_df_display.apply(lambda row: row.astype(str).str.contains(search_wish, case=False).any(), axis=1)
+                wish_df_display.apply(lambda row: row.astype(str).str.contains(search_wish, case=False, na=False).any(), axis=1)
             ]
             
         st.dataframe(
@@ -620,6 +614,8 @@ with tabs[1]:
 with tabs[2]:
     st.header("Recommendations")
     library_df = load_data("Library")
+    wishlist_df = load_data("Wishlist")
+
     if not library_df.empty and "Author" in library_df.columns:
         authors = library_df["Author"].dropna().unique()
         selected_author = st.selectbox("Find books by authors you've read:", authors)
@@ -661,7 +657,7 @@ with tabs[2]:
                         st.caption(vi.get("description", 'No description available.'))
                         st.markdown("---")
             else:
-                st.info("No recommendations found for this author.")
+                st.info(f"No recommendations found for {selected_author}.")
     else:
         st.info("Read some books to get recommendations!")
 
