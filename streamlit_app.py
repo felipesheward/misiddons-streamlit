@@ -346,37 +346,51 @@ def get_book_details_openlibrary(isbn: str) -> dict:
     except Exception:
         return {}
 
+def get_book_details_third_party(isbn: str) -> dict:
+    """
+    Placeholder for a third-party API call (e.g., Goodreads).
+    
+    NOTE: Goodreads has stopped issuing API keys to new developers.
+    A real implementation would need to use a working API or web scraping.
+    """
+    st.info("Falling back to a third-party source for metadata...")
+    # This is a placeholder. You would replace this with actual API call logic.
+    return {}
+
 
 def get_book_metadata(isbn: str) -> dict:
-    """Merge Google + OpenLibrary so missing fields are filled, and compute ratings."""
+    """Merge details from multiple sources for a robust result."""
+    meta = get_book_details_google(isbn)
+    
+    # If Google Books returns an incomplete result, try OpenLibrary
+    if not meta.get("Title"):
+        ol_meta = get_book_details_openlibrary(isbn)
+        meta = {**ol_meta, **meta} # Prefer data from the first source when available
+    
+    # If OpenLibrary also fails, try a third-party source
+    if not meta.get("Title"):
+        third_party_meta = get_book_details_third_party(isbn)
+        meta = {**third_party_meta, **meta}
+
+    # Ensure all required keys exist, even if empty
+    required_keys = ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]
+    for k in required_keys:
+        meta.setdefault(k, "")
+    
+    # Re-fetch ratings to ensure they are merged correctly if one source has them and another doesn't
     g = get_book_details_google(isbn)
-    # Added "PublishedDate" to the list of keys to check
-    need_keys = ["Description", "Thumbnail", "Language", "Genre", "Title", "Author", "PublishedDate"]
-    o = {}
-    if not g or any(not g.get(k) for k in need_keys):
-        o = get_book_details_openlibrary(isbn)
-    if not g and not o:
-        return {}
-    merged = {**o, **g}  # prefer Google when present
-    for k in need_keys:
-        if not merged.get(k) and (o.get(k)):
-            merged[k] = o[k]
-    merged["Language"] = normalize_language(merged.get("Language", "")) or ("English" if "english literature" in merged.get("Genre", "").lower() else "")
-    # Ratings: Google + OpenLibrary (works)
+    ol_avg, ol_count = get_openlibrary_rating(isbn)
     parts = []
     if g.get("Rating"):
         parts.append(f"GB:{g['Rating']}")
-    ol_avg, ol_count = get_openlibrary_rating(isbn)
     if ol_avg:
         try:
             parts.append(f"OL:{round(float(ol_avg), 2)}")
         except Exception:
             parts.append(f"OL:{ol_avg}")
-    merged["Rating"] = " | ".join(parts)
-    # Added "PublishedDate" to the setdefault call
-    for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
-        merged.setdefault(k, "")
-    return merged
+    meta["Rating"] = " | ".join(parts)
+    
+    return meta
 
 @st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list:
