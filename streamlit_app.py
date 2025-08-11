@@ -3,7 +3,7 @@
 """
 Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
-- Scan barcodes from a photo to auto‑fill metadata (title, author, cover, description)
+- Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
 """
@@ -25,10 +25,10 @@ except Exception:
     zbar_decode = None
 
 # ---------- CONFIG ----------
-DEFAULT_SHEET_ID  = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
-SPREADSHEET_ID    = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
+DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
+SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
 GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
-GOOGLE_BOOKS_KEY  = st.secrets.get("google_books_api_key", None)
+GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
@@ -86,7 +86,7 @@ def load_data(worksheet: str) -> pd.DataFrame:
         return pd.DataFrame()
     except APIError as e:
         code = getattr(getattr(e, 'response', None), 'status_code', 'unknown')
-        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}). If 404/403, re‑share the sheet with the service account and verify the ID.")
+        st.error(f"Google Sheets API error while loading '{worksheet}' (HTTP {code}). If 404/403, re-share the sheet with the service account and verify the ID.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
@@ -109,8 +109,9 @@ def _get_ws(tab: str):
         raise
 
 # ---------- Sheet write helpers ----------
+# Added "PublishedDate" to the list of fixed headers
 EXACT_HEADERS = [
-    "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","Date Read"
+    "ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate","Date Read"
 ]
 
 ISO_LANG = {
@@ -153,8 +154,8 @@ def append_record(tab: str, record: dict) -> None:
         # 2) De-dup in this tab
         values = ws.get_all_values()
         existing_isbns, existing_ta = set(), set()
-        i_isbn   = headers.index("ISBN") if "ISBN" in headers else None
-        i_title  = headers.index("Title") if "Title" in headers else None
+        i_isbn = headers.index("ISBN") if "ISBN" in headers else None
+        i_title = headers.index("Title") if "Title" in headers else None
         i_author = headers.index("Author") if "Author" in headers else None
         for r in values[1:]:
             if i_isbn is not None and len(r) > i_isbn:
@@ -220,6 +221,8 @@ def get_book_details_google(isbn: str) -> dict:
             "Thumbnail": thumb,
             "Description": (desc or "").strip(),
             "Rating": str(info.get("averageRating", "")),
+            # Added publishedDate to the returned dictionary
+            "PublishedDate": info.get("publishedDate", ""),
         }
     except Exception:
         return {}
@@ -320,6 +323,8 @@ def get_book_details_openlibrary(isbn: str) -> dict:
                     lang = lang_codes[0].get("key", "").split("/")[-1].upper()
             except Exception:
                 lang = ""
+        # Added publish_date to the returned dictionary
+        published_date = data.get("publish_date", "")
         return {
             "ISBN": isbn,
             "Title": data.get("title", ""),
@@ -328,6 +333,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
             "Language": lang,
             "Thumbnail": cover,
             "Description": (desc or "").strip(),
+            "PublishedDate": published_date,
         }
     except Exception:
         return {}
@@ -336,7 +342,8 @@ def get_book_details_openlibrary(isbn: str) -> dict:
 def get_book_metadata(isbn: str) -> dict:
     """Merge Google + OpenLibrary so missing fields are filled, and compute ratings."""
     g = get_book_details_google(isbn)
-    need_keys = ["Description", "Thumbnail", "Language", "Genre", "Title", "Author"]
+    # Added "PublishedDate" to the list of keys to check
+    need_keys = ["Description", "Thumbnail", "Language", "Genre", "Title", "Author", "PublishedDate"]
     o = {}
     if not g or any(not g.get(k) for k in need_keys):
         o = get_book_details_openlibrary(isbn)
@@ -358,7 +365,8 @@ def get_book_metadata(isbn: str) -> dict:
         except Exception:
             parts.append(f"OL:{ol_avg}")
     merged["Rating"] = " | ".join(parts)
-    for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating"]:
+    # Added "PublishedDate" to the setdefault call
+    for k in ["ISBN","Title","Author","Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
         merged.setdefault(k, "")
     return merged
 
@@ -392,6 +400,7 @@ st.title("Misiddons Book Database")
 # — Add Book Form —
 with st.expander("✍️ Add a New Book", expanded=False):
     with st.form("entry_form"):
+        # Pre-populate form fields with scanned data if available
         cols = st.columns(5)
         title = cols[0].text_input("Title", value=st.session_state.get("scan_title", ""))
         author = cols[1].text_input("Author", value=st.session_state.get("scan_author", ""))
@@ -404,11 +413,17 @@ with st.expander("✍️ Add a New Book", expanded=False):
                 try:
                     scan_meta = st.session_state.get("last_scan_meta", {})
                     rec = {"ISBN": isbn, "Title": title, "Author": author, "Date Read": date_read}
-                    for k in ["Genre","Language","Thumbnail","Description","Rating"]:
+                    # Add all other metadata from the scan to the record
+                    for k in ["Genre","Language","Thumbnail","Description","Rating","PublishedDate"]:
                         if k in scan_meta and scan_meta[k] and k not in rec:
                             rec[k] = scan_meta[k]
                     append_record(choice, rec)
                     st.success(f"Added '{title}' to {choice}.")
+                    # Clear session state for next entry
+                    st.session_state["scan_isbn"] = ""
+                    st.session_state["scan_title"] = ""
+                    st.session_state["scan_author"] = ""
+                    st.session_state["last_scan_meta"] = {}
                     st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to add book: {e}")
@@ -434,12 +449,21 @@ if zbar_decode:
                 isbn_bc = _extract_isbn_from_raw(raw)
                 st.info(f"Detected code: {raw} → Using ISBN: {isbn_bc}")
 
-                meta = get_book_metadata(isbn_bc)
-                if not meta:
-                    st.error("Couldn't fetch details from Google/OpenLibrary.")
+                with st.spinner("Fetching book details..."):
+                    meta = get_book_metadata(isbn_bc)
+
+                if not meta or not meta.get("Title"):
+                    st.error("Couldn't fetch details from Google/OpenLibrary. Check the ISBN or try again.")
                 else:
+                    # Update session state for the manual entry form
+                    st.session_state["scan_isbn"] = meta.get("ISBN", "")
+                    st.session_state["scan_title"] = meta.get("Title", "")
+                    st.session_state["scan_author"] = meta.get("Author", "")
+                    st.session_state["last_scan_meta"] = meta
+
                     with st.expander("Show raw metadata", expanded=False):
                         st.json(meta)
+                    
                     cols = st.columns([1,3])
                     with cols[0]:
                         if meta.get("Thumbnail"):
@@ -447,13 +471,24 @@ if zbar_decode:
                     with cols[1]:
                         st.subheader(meta.get("Title","Unknown Title"))
                         st.write(f"**Author:** {meta.get('Author','Unknown')}")
-                        if meta.get("Genre"):
-                            st.write(f"**Genre:** {meta.get('Genre')}")
+                        st.write(f"**Published Date:** {meta.get('PublishedDate','Unknown')}")
+                        if meta.get("Rating"):
+                             st.write(f"**Rating:** {meta.get('Rating')}")
                         if meta.get("Language"):
                             st.write(f"**Language:** {meta.get('Language')}")
-                        if meta.get("Description"):
-                            desc = meta["Description"]
-                            st.caption(desc[:800] + ("…" if len(desc) > 800 else ""))
+
+                    # Description with 'Read more' logic
+                    full_desc = meta.get("Description", "")
+                    if full_desc:
+                        # Split the description by newlines to count lines
+                        lines = full_desc.split('\n')
+                        # Heuristic: show the first 5 lines or the first 500 characters
+                        if len(lines) > 5 or len(full_desc) > 500:
+                            short_desc = "\n".join(lines[:5])
+                            with st.expander("Description (click to expand)"):
+                                st.write(full_desc)
+                        else:
+                            st.caption(full_desc)
 
                     a1, a2 = st.columns(2)
                     with a1:
@@ -461,6 +496,10 @@ if zbar_decode:
                             try:
                                 append_record("Library", meta)
                                 st.success("Added to Library ✔")
+                                st.session_state["scan_isbn"] = ""
+                                st.session_state["scan_title"] = ""
+                                st.session_state["scan_author"] = ""
+                                st.session_state["last_scan_meta"] = {}
                                 st.experimental_rerun()
                             except Exception:
                                 pass
@@ -469,6 +508,10 @@ if zbar_decode:
                             try:
                                 append_record("Wishlist", meta)
                                 st.success("Added to Wishlist ✔")
+                                st.session_state["scan_isbn"] = ""
+                                st.session_state["scan_title"] = ""
+                                st.session_state["scan_author"] = ""
+                                st.session_state["last_scan_meta"] = {}
                                 st.experimental_rerun()
                             except Exception:
                                 pass
