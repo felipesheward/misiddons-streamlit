@@ -461,35 +461,35 @@ def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
 
 # ---------- Sheet writer ----------
 def update_row_fields(tab: str, row_number: int, fields: dict) -> bool:
-    """Update specific columns in a given sheet row (1-based; header row is 1)."""
+    """Update specific columns in a given sheet row (1-based, header row is 1)."""
     try:
         ws = _get_ws(tab)
         if not ws:
             raise RuntimeError("Worksheet not found")
 
-        # Header → column index
         headers = [h.strip() for h in ws.row_values(1)]
         colmap = {h: i + 1 for i, h in enumerate(headers)}
 
-        # Current row values
+        # Current row values (pad to header width)
         row_vals = ws.row_values(row_number)
         if len(row_vals) < len(headers):
             row_vals += [""] * (len(headers) - len(row_vals))
 
-        # Apply updates
         for k, v in fields.items():
-            if k == "ISBN" and str(v).isdigit():  # keep ISBN as text in Sheets
+            # Keep numeric ISBN as text in Sheets to preserve leading zeros
+            if k == "ISBN" and str(v).isdigit():
                 v = "'" + str(v).strip()
             if k in colmap:
                 row_vals[colmap[k] - 1] = v
 
-        # Write back the full row (from col A)
+        # Write the full row back from column A
         ws.update(f"A{row_number}", [row_vals])
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Couldn't update row {row_number} in '{tab}': {e}")
         return False
+
 
 
 def append_record(tab: str, record: dict) -> None:
@@ -1028,144 +1028,6 @@ with st.expander("🔍 Data Check — Library", expanded=False):
             st.success("Looks good! No issues detected in Library 🎉")
 
 
-# ==== Cross-check Authors & Titles (Library) ===================================
-import re, unicodedata
-from difflib import SequenceMatcher
-
-def _strip_diacritics(s: str) -> str:
-    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
-
-def _norm_title(s: str) -> str:
-    s = _strip_diacritics(str(s))
-    s = re.split(r"[:(\\[]", s, 1)[0]             # drop subtitle/series
-    s = re.sub(r"\\b(a|an|the)\\b\\s+", "", s, flags=re.I)  # drop leading articles
-    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
-    s = re.sub(r"\\s+", " ", s).strip()
-    return s
-
-def _norm_author(s: str) -> str:
-    s = keep_primary_author(str(s))               # your helper (keeps 1st author)
-    s = _strip_diacritics(s).replace("&", "and")
-    s = re.sub(r"[^a-z ]+", " ", s.lower())
-    s = re.sub(r"\\s+", " ", s).strip()
-    return s
-
-@st.cache_data(ttl=86400)
-def _search_google_by_ta(title: str, author: str) -> dict:
-    try:
-        q = f'intitle:"{title}" inauthor:"{author}"'
-        params = {"q": q, "printType": "books", "maxResults": 1}
-        if GOOGLE_BOOKS_KEY: params["key"] = GOOGLE_BOOKS_KEY
-        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
-        if r.ok and r.json().get("items"):
-            vi = r.json()["items"][0].get("volumeInfo", {})
-            au = (vi.get("authors") or [])
-            return {
-                "source": "google-search",
-                "Title": (vi.get("title") or "").strip(),
-                "Author": keep_primary_author(au[0].strip()) if au else ""
-            }
-    except Exception:
-        pass
-    return {}
-
-@st.cache_data(ttl=86400)
-def _search_ol_by_ta(title: str, author: str) -> dict:
-    try:
-        r = requests.get("https://openlibrary.org/search.json",
-                         params={"title": title, "author": author, "limit": 1}, timeout=12, headers=UA)
-        if r.ok:
-            docs = (r.json().get("docs") or [])
-            if docs:
-                au = (docs[0].get("author_name") or [])
-                return {
-                    "source": "ol-search",
-                    "Title": (docs[0].get("title") or "").strip(),
-                    "Author": keep_primary_author(au[0].strip()) if au else ""
-                }
-    except Exception:
-        pass
-    return {}
-
-@st.cache_data(ttl=86400)
-def _canonical_from_row(title: str, author: str, isbn: str) -> dict:
-    """Prefer ISBN lookups; fall back to title+author search."""
-    isbn = _normalize_isbn(isbn)
-    if isbn:
-        g = get_book_details_google(isbn)
-        if g.get("Title"):
-            return {"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]}
-        o = get_book_details_openlibrary(isbn)
-        if o.get("Title"):
-            return {"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]}
-    # No ISBN or no hit → search by Title+Author
-    s = _search_google_by_ta(title, author) or _search_ol_by_ta(title, author)
-    return s or {}
-
-with st.expander("🔎 Cross-check — Authors & Titles (Library)", expanded=False):
-    lib = load_data("Library")
-    if lib.empty:
-        st.info("Library sheet is empty.")
-    else:
-        # Ensure columns exist
-        for c in ["ISBN", "Title", "Author"]:
-            if c not in lib.columns:
-                lib[c] = ""
-
-        rows = []
-        issues = []
-        for i, r in lib.iterrows():
-            sheet_title  = str(r["Title"]).strip()
-            sheet_author = str(r["Author"]).strip()
-            sheet_isbn   = str(r["ISBN"]).strip()
-
-            if not sheet_title and not sheet_author:
-                continue
-
-            can = _canonical_from_row(sheet_title, sheet_author, sheet_isbn)
-            if not can:
-                rows.append({
-                    "Row": i+2, "ISBN": sheet_isbn,
-                    "Sheet Title": sheet_title, "Sheet Author": sheet_author,
-                    "Canonical Title": "(not found)", "Canonical Author": "(not found)",
-                    "Title Match": "n/a", "Author Match": "n/a", "Source": "n/a", "Note": "No external match"
-                })
-                continue
-
-            nt_s = _norm_title(sheet_title);  nt_c = _norm_title(can["Title"])
-            na_s = _norm_author(sheet_author); na_c = _norm_author(can["Author"])
-
-            t_ratio = SequenceMatcher(None, nt_s, nt_c).ratio() if nt_c else 0.0
-            a_ratio = SequenceMatcher(None, na_s, na_c).ratio() if na_c else 0.0
-
-            t_match = "exact" if nt_s == nt_c else ("close" if t_ratio >= 0.85 else "diff")
-            a_match = "exact" if na_s == na_c else ("close" if a_ratio >= 0.85 else "diff")
-
-            note = ""
-            if t_match == "diff":
-                note += "Title differs. "
-            if a_match == "diff":
-                note += "Author differs. "
-            if not note and (t_match == "close" or a_match == "close"):
-                note = "Minor variance (edition/subtitle/diacritics)."
-
-            row_info = {
-                "Row": i+2, "ISBN": sheet_isbn,
-                "Sheet Title": sheet_title, "Canonical Title": can["Title"], "Title Match": t_match,
-                "Sheet Author": sheet_author, "Canonical Author": can["Author"], "Author Match": a_match,
-                "Source": can.get("source",""), "Note": note.strip()
-            }
-            rows.append(row_info)
-            if t_match != "exact" or a_match != "exact":
-                issues.append(row_info)
-
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        if issues:
-            st.warning(f"{len(issues)} row(s) need attention. Look at 'diff' rows and update the sheet if needed.")
-        else:
-            st.success("All titles & authors match the external sources 🎯")
-
-
 # ==== Cross-check & Fix — Titles and Authors (Library) =========================
 import re, unicodedata
 from difflib import SequenceMatcher
@@ -1175,70 +1037,79 @@ def _strip_diacritics(s: str) -> str:
 
 def _norm_title(s: str) -> str:
     s = _strip_diacritics(str(s))
-    s = re.split(r"[:(\\[]", s, 1)[0]           # drop subtitle/series
-    s = re.sub(r"\\b(a|an|the)\\b\\s+", "", s, flags=re.I)  # drop leading articles
+    s = re.split(r"[:(\[]", s, 1)[0]           # drop subtitle/series
     s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
-    s = re.sub(r"\\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ").strip()
     return s
 
 def _norm_author(s: str) -> str:
     s = keep_primary_author(str(s))             # your helper (keeps 1st author)
     s = _strip_diacritics(s).replace("&", "and")
     s = re.sub(r"[^a-z ]+", " ", s.lower())
-    s = re.sub(r"\\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ").strip()
     return s
 
 @st.cache_data(ttl=86400)
-def _search_google_by_ta(title: str, author: str) -> dict:
+def _search_google_by_title(title: str, max_results: int = 3) -> list[dict]:
+    out = []
     try:
-        q = f'intitle:"{title}" inauthor:"{author}"'
-        params = {"q": q, "printType": "books", "maxResults": 1}
-        if GOOGLE_BOOKS_KEY: params["key"] = GOOGLE_BOOKS_KEY
+        params = {"q": f"intitle:{title}", "printType": "books", "maxResults": max_results}
+        if GOOGLE_BOOKS_KEY:
+            params["key"] = GOOGLE_BOOKS_KEY
         r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
-        if r.ok and r.json().get("items"):
-            vi = r.json()["items"][0].get("volumeInfo", {})
-            au = (vi.get("authors") or [])
-            return {
-                "source": "google-search",
-                "Title": (vi.get("title") or "").strip(),
-                "Author": keep_primary_author(au[0].strip()) if au else ""
-            }
-    except Exception:
-        pass
-    return {}
-
-@st.cache_data(ttl=86400)
-def _search_ol_by_ta(title: str, author: str) -> dict:
-    try:
-        r = requests.get("https://openlibrary.org/search.json",
-                         params={"title": title, "author": author, "limit": 1}, timeout=12, headers=UA)
         if r.ok:
-            docs = (r.json().get("docs") or [])
-            if docs:
-                au = (docs[0].get("author_name") or [])
-                return {
-                    "source": "ol-search",
-                    "Title": (docs[0].get("title") or "").strip(),
+            for item in r.json().get("items", []) or []:
+                vi = item.get("volumeInfo", {})
+                au = (vi.get("authors") or [])
+                out.append({
+                    "source": "google-search",
+                    "Title": (vi.get("title") or "").strip(),
                     "Author": keep_primary_author(au[0].strip()) if au else ""
-                }
+                })
     except Exception:
         pass
-    return {}
+    return out
 
 @st.cache_data(ttl=86400)
-def _canonical_from_row(title: str, author: str, isbn: str) -> dict:
-    """Prefer ISBN lookups; fall back to title+author search."""
-    isbn = _normalize_isbn(isbn)
-    if isbn:
-        g = get_book_details_google(isbn)
+def _search_ol_by_title(title: str, limit: int = 5) -> list[dict]:
+    out = []
+    try:
+        r = requests.get("https://openlibrary.org/search.json", params={"title": title, "limit": limit}, timeout=12, headers=UA)
+        if r.ok:
+            for doc in (r.json().get("docs") or [])[:limit]:
+                au = (doc.get("author_name") or [])
+                out.append({
+                    "source": "ol-search",
+                    "Title": (doc.get("title") or "").strip(),
+                    "Author": keep_primary_author(au[0].strip()) if au else ""
+                })
+    except Exception:
+        pass
+    return out
+
+@st.cache_data(ttl=86400)
+def _candidates_from_row(title: str, author: str, isbn: str) -> list[dict]:
+    """Candidates without biasing by wrong sheet author."""
+    cand: list[dict] = []
+    isbn_norm = _normalize_isbn(isbn)
+    if isbn_norm:
+        g = get_book_details_google(isbn_norm)
         if g.get("Title"):
-            return {"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]}
-        o = get_book_details_openlibrary(isbn)
+            cand.append({"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]})
+        o = get_book_details_openlibrary(isbn_norm)
         if o.get("Title"):
-            return {"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]}
-    # No ISBN or no hit → search
-    s = _search_google_by_ta(title, author) or _search_ol_by_ta(title, author)
-    return s or {}
+            cand.append({"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]})
+    # Title-only searches (do NOT include sheet author)
+    cand.extend(_search_google_by_title(title, 3))
+    cand.extend(_search_ol_by_title(title, 5))
+
+    # Deduplicate
+    seen = set(); uniq = []
+    for c in cand:
+        key = (_norm_title(c.get("Title","")), _norm_author(c.get("Author","")))
+        if key not in seen and (c.get("Title") or c.get("Author")):
+            seen.add(key); uniq.append(c)
+    return uniq
 
 with st.expander("🔎 Cross-check & Fix — Titles and Authors (Library)", expanded=False):
     lib = load_data("Library")
@@ -1246,80 +1117,81 @@ with st.expander("🔎 Cross-check & Fix — Titles and Authors (Library)", expa
         st.info("Library sheet is empty.")
     else:
         for c in ["ISBN", "Title", "Author"]:
-            if c not in lib.columns: lib[c] = ""
+            if c not in lib.columns:
+                lib[c] = ""
 
-        diffs = []
+        found_any = False
         for i, r in lib.iterrows():
-            rownum = i + 2  # account for header row
-            sheet_title  = str(r["Title"]).strip()
-            sheet_author = str(r["Author"]).strip()
-            sheet_isbn   = str(r["ISBN"]).strip()
-            if not sheet_title and not sheet_author:
+            rownum = i + 2  # header row is 1
+            t_sheet = str(r["Title"]).strip()
+            a_sheet = str(r["Author"]).strip()
+            i_sheet = str(r["ISBN"]).strip()
+            if not t_sheet and not a_sheet:
                 continue
 
-            can = _canonical_from_row(sheet_title, sheet_author, sheet_isbn)
-            if not can:
+            cands = _candidates_from_row(t_sheet, a_sheet, i_sheet)
+
+            # Pick a best by title similarity
+            def score(c):
+                return SequenceMatcher(None, _norm_title(t_sheet), _norm_title(c.get("Title",""))).ratio()
+            best = max(cands, key=score, default={})
+            if not best:
                 continue
 
-            nt_s = _norm_title(sheet_title);  nt_c = _norm_title(can["Title"])
-            na_s = _norm_author(sheet_author); na_c = _norm_author(can["Author"])
+            # exact = raw equality; close = high normalized ratio
+            def title_match_kind(s, c):
+                if s.strip() == c.strip():
+                    return "exact"
+                r = SequenceMatcher(None, _norm_title(s), _norm_title(c)).ratio()
+                return "close" if r >= 0.85 else "diff"
 
-            t_ratio = SequenceMatcher(None, nt_s, nt_c).ratio() if nt_c else 0.0
-            a_ratio = SequenceMatcher(None, na_s, na_c).ratio() if na_c else 0.0
+            def author_match_kind(s, c):
+                s1, c1 = _norm_author(s), _norm_author(c)
+                if s1 == c1 and s1 != "":
+                    return "exact"
+                r = SequenceMatcher(None, s1, c1).ratio() if c1 else 0.0
+                return "close" if r >= 0.85 else "diff"
 
-            t_match = "exact" if nt_s == nt_c else ("close" if t_ratio >= 0.85 else "diff")
-            a_match = "exact" if na_s == na_c else ("close" if a_ratio >= 0.85 else "diff")
+            t_kind = title_match_kind(t_sheet, best.get("Title",""))
+            a_kind = author_match_kind(a_sheet, best.get("Author",""))
 
-            if (t_match != "exact") or (a_match != "exact"):
-                diffs.append({
-                    "Row": rownum,
-                    "Sheet Title": sheet_title,
-                    "Sheet Author": sheet_author,
-                    "Canonical Title": can["Title"],
-                    "Canonical Author": can["Author"],
-                    "Title Match": t_match,
-                    "Author Match": a_match,
-                    "Source": can.get("source","")
-                })
+            if (t_kind != "exact") or (a_kind != "exact"):
+                found_any = True
+                # Build choices
+                options = [("Keep current", {"Title": t_sheet, "Author": a_sheet, "source": "sheet"})]
+                for c in cands:
+                    label = f"{c['source']}: {c['Title']} — {c['Author']}"
+                    options.append((label, c))
 
-        if not diffs:
-            st.success("All titles & authors match 🎯")
-        else:
-            st.warning(f"Found {len(diffs)} item(s) to review.")
-            # Numbered items with per-entry update buttons
-            for idx, drow in enumerate(diffs, start=1):
-                st.markdown(f"**{idx}. Row {drow['Row']}** — Source: *{drow['Source']}*")
-                c1, c2 = st.columns(2)
+                idx = i + 1  # just for keys; independent numbering is fine
+                st.markdown(f"**{idx}. Row {rownum}**")
+                st.caption(f"Sheet: {t_sheet} — {a_sheet}")
 
-                with c1:
-                    st.write("**In sheet**")
-                    st.write(f"Title: {drow['Sheet Title']}")
-                    st.write(f"Author: {drow['Sheet Author']}")
+                choice = st.selectbox(
+                    "Choose correction:",
+                    options=[lbl for lbl, _ in options],
+                    key=f"cc_choice_{idx}"
+                )
+                chosen = dict(options[[lbl for lbl, _ in options].index(choice)][1])
 
-                with c2:
-                    st.write("**Proposed**")
-                    st.write(f"Title: {drow['Canonical Title']}  ({drow['Title Match']})")
-                    st.write(f"Author: {drow['Canonical Author']}  ({drow['Author Match']})")
+                apply_title  = st.checkbox("Update title",  value=(t_kind != "exact"), key=f"cc_t_{idx}")
+                apply_author = st.checkbox("Update author", value=(a_kind != "exact"), key=f"cc_a_{idx}")
 
-                fix_title  = drow["Title Match"]  != "exact"
-                fix_author = drow["Author Match"] != "exact"
-
-                colA, colB, colC = st.columns([1,1,2])
-                with colA:
-                    do_title  = st.checkbox("Update title",  value=fix_title,  key=f"upd_t_{idx}")
-                with colB:
-                    do_author = st.checkbox("Update author", value=fix_author, key=f"upd_a_{idx}")
-                with colC:
-                    if st.button(f"Update #{idx}", key=f"btn_upd_{idx}"):
+                cols_fix = st.columns([1,1,2])
+                with cols_fix[2]:
+                    if st.button(f"Apply update #{idx}", key=f"btn_fix_{idx}"):
                         fields = {}
-                        if do_title:  fields["Title"]  = drow["Canonical Title"]
-                        if do_author: fields["Author"] = drow["Canonical Author"]
+                        if apply_title:
+                            fields["Title"]  = chosen.get("Title","")
+                        if apply_author:
+                            fields["Author"] = chosen.get("Author","")
                         if not fields:
                             st.info("Nothing selected to update.")
                         else:
-                            ok = update_row_fields("Library", drow["Row"], fields)
+                            ok = update_row_fields("Library", rownum, fields)
                             if ok:
-                                st.success(f"Row {drow['Row']} updated.")
+                                st.success(f"Row {rownum} updated.")
                                 st.rerun()
 
-
+        if not found_any:
+            st.success("All titles & authors look good 🎯")
