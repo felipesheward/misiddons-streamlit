@@ -460,6 +460,37 @@ def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
     return placeholder, (title or "No Cover")
 
 # ---------- Sheet writer ----------
+def update_row_fields(tab: str, row_number: int, fields: dict) -> bool:
+    """Update specific columns in a given sheet row (1-based; header row is 1)."""
+    try:
+        ws = _get_ws(tab)
+        if not ws:
+            raise RuntimeError("Worksheet not found")
+
+        # Header → column index
+        headers = [h.strip() for h in ws.row_values(1)]
+        colmap = {h: i + 1 for i, h in enumerate(headers)}
+
+        # Current row values
+        row_vals = ws.row_values(row_number)
+        if len(row_vals) < len(headers):
+            row_vals += [""] * (len(headers) - len(row_vals))
+
+        # Apply updates
+        for k, v in fields.items():
+            if k == "ISBN" and str(v).isdigit():  # keep ISBN as text in Sheets
+                v = "'" + str(v).strip()
+            if k in colmap:
+                row_vals[colmap[k] - 1] = v
+
+        # Write back the full row (from col A)
+        ws.update(f"A{row_number}", [row_vals])
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Couldn't update row {row_number} in '{tab}': {e}")
+        return False
+
 
 def append_record(tab: str, record: dict) -> None:
     """Ensure headers, dedupe (ISBN or Title+Author), preserve ISBN as text, then append."""
@@ -1134,5 +1165,161 @@ with st.expander("🔎 Cross-check — Authors & Titles (Library)", expanded=Fal
         else:
             st.success("All titles & authors match the external sources 🎯")
 
+
+# ==== Cross-check & Fix — Titles and Authors (Library) =========================
+import re, unicodedata
+from difflib import SequenceMatcher
+
+def _strip_diacritics(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+
+def _norm_title(s: str) -> str:
+    s = _strip_diacritics(str(s))
+    s = re.split(r"[:(\\[]", s, 1)[0]           # drop subtitle/series
+    s = re.sub(r"\\b(a|an|the)\\b\\s+", "", s, flags=re.I)  # drop leading articles
+    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
+    s = re.sub(r"\\s+", " ", s).strip()
+    return s
+
+def _norm_author(s: str) -> str:
+    s = keep_primary_author(str(s))             # your helper (keeps 1st author)
+    s = _strip_diacritics(s).replace("&", "and")
+    s = re.sub(r"[^a-z ]+", " ", s.lower())
+    s = re.sub(r"\\s+", " ", s).strip()
+    return s
+
+@st.cache_data(ttl=86400)
+def _search_google_by_ta(title: str, author: str) -> dict:
+    try:
+        q = f'intitle:"{title}" inauthor:"{author}"'
+        params = {"q": q, "printType": "books", "maxResults": 1}
+        if GOOGLE_BOOKS_KEY: params["key"] = GOOGLE_BOOKS_KEY
+        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
+        if r.ok and r.json().get("items"):
+            vi = r.json()["items"][0].get("volumeInfo", {})
+            au = (vi.get("authors") or [])
+            return {
+                "source": "google-search",
+                "Title": (vi.get("title") or "").strip(),
+                "Author": keep_primary_author(au[0].strip()) if au else ""
+            }
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(ttl=86400)
+def _search_ol_by_ta(title: str, author: str) -> dict:
+    try:
+        r = requests.get("https://openlibrary.org/search.json",
+                         params={"title": title, "author": author, "limit": 1}, timeout=12, headers=UA)
+        if r.ok:
+            docs = (r.json().get("docs") or [])
+            if docs:
+                au = (docs[0].get("author_name") or [])
+                return {
+                    "source": "ol-search",
+                    "Title": (docs[0].get("title") or "").strip(),
+                    "Author": keep_primary_author(au[0].strip()) if au else ""
+                }
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(ttl=86400)
+def _canonical_from_row(title: str, author: str, isbn: str) -> dict:
+    """Prefer ISBN lookups; fall back to title+author search."""
+    isbn = _normalize_isbn(isbn)
+    if isbn:
+        g = get_book_details_google(isbn)
+        if g.get("Title"):
+            return {"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]}
+        o = get_book_details_openlibrary(isbn)
+        if o.get("Title"):
+            return {"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]}
+    # No ISBN or no hit → search
+    s = _search_google_by_ta(title, author) or _search_ol_by_ta(title, author)
+    return s or {}
+
+with st.expander("🔎 Cross-check & Fix — Titles and Authors (Library)", expanded=False):
+    lib = load_data("Library")
+    if lib.empty:
+        st.info("Library sheet is empty.")
+    else:
+        for c in ["ISBN", "Title", "Author"]:
+            if c not in lib.columns: lib[c] = ""
+
+        diffs = []
+        for i, r in lib.iterrows():
+            rownum = i + 2  # account for header row
+            sheet_title  = str(r["Title"]).strip()
+            sheet_author = str(r["Author"]).strip()
+            sheet_isbn   = str(r["ISBN"]).strip()
+            if not sheet_title and not sheet_author:
+                continue
+
+            can = _canonical_from_row(sheet_title, sheet_author, sheet_isbn)
+            if not can:
+                continue
+
+            nt_s = _norm_title(sheet_title);  nt_c = _norm_title(can["Title"])
+            na_s = _norm_author(sheet_author); na_c = _norm_author(can["Author"])
+
+            t_ratio = SequenceMatcher(None, nt_s, nt_c).ratio() if nt_c else 0.0
+            a_ratio = SequenceMatcher(None, na_s, na_c).ratio() if na_c else 0.0
+
+            t_match = "exact" if nt_s == nt_c else ("close" if t_ratio >= 0.85 else "diff")
+            a_match = "exact" if na_s == na_c else ("close" if a_ratio >= 0.85 else "diff")
+
+            if (t_match != "exact") or (a_match != "exact"):
+                diffs.append({
+                    "Row": rownum,
+                    "Sheet Title": sheet_title,
+                    "Sheet Author": sheet_author,
+                    "Canonical Title": can["Title"],
+                    "Canonical Author": can["Author"],
+                    "Title Match": t_match,
+                    "Author Match": a_match,
+                    "Source": can.get("source","")
+                })
+
+        if not diffs:
+            st.success("All titles & authors match 🎯")
+        else:
+            st.warning(f"Found {len(diffs)} item(s) to review.")
+            # Numbered items with per-entry update buttons
+            for idx, drow in enumerate(diffs, start=1):
+                st.markdown(f"**{idx}. Row {drow['Row']}** — Source: *{drow['Source']}*")
+                c1, c2 = st.columns(2)
+
+                with c1:
+                    st.write("**In sheet**")
+                    st.write(f"Title: {drow['Sheet Title']}")
+                    st.write(f"Author: {drow['Sheet Author']}")
+
+                with c2:
+                    st.write("**Proposed**")
+                    st.write(f"Title: {drow['Canonical Title']}  ({drow['Title Match']})")
+                    st.write(f"Author: {drow['Canonical Author']}  ({drow['Author Match']})")
+
+                fix_title  = drow["Title Match"]  != "exact"
+                fix_author = drow["Author Match"] != "exact"
+
+                colA, colB, colC = st.columns([1,1,2])
+                with colA:
+                    do_title  = st.checkbox("Update title",  value=fix_title,  key=f"upd_t_{idx}")
+                with colB:
+                    do_author = st.checkbox("Update author", value=fix_author, key=f"upd_a_{idx}")
+                with colC:
+                    if st.button(f"Update #{idx}", key=f"btn_upd_{idx}"):
+                        fields = {}
+                        if do_title:  fields["Title"]  = drow["Canonical Title"]
+                        if do_author: fields["Author"] = drow["Canonical Author"]
+                        if not fields:
+                            st.info("Nothing selected to update.")
+                        else:
+                            ok = update_row_fields("Library", drow["Row"], fields)
+                            if ok:
+                                st.success(f"Row {drow['Row']} updated.")
+                                st.rerun()
 
 
