@@ -619,8 +619,7 @@ if zbar_decode:
 
                     full_desc = meta.get("Description", "")
                     if full_desc:
-                        lines = full_desc.split('
-')
+                        lines = full_desc.split('\n')
                         if len(lines) > 5 or len(full_desc) > 500:
                             with st.expander("Description (click to expand)"):
                                 st.write(full_desc)
@@ -804,9 +803,8 @@ with tabs[3]:
                             st.error(f"Could not add: {e}")
                     st.markdown("---")
                 shown += 1
-
-            if shown >= 5:
-                break
+                if shown >= 5:
+                    break
 
             if shown == 0:
                 st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
