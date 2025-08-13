@@ -222,7 +222,7 @@ def get_book_details_google(isbn: str) -> dict:
             thumb = thumb.replace("http://", "https://")
         cats = info.get("categories") or []
         authors = info.get("authors") or []
-        author = ", ".join(a.strip() for a in authors if a)
+        author = (authors[0].strip() if authors else "")
 
         return {
             "ISBN": isbn,
@@ -253,7 +253,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
 
         # Author(s)
         authors_list = data.get("authors", [])
-        author = ", ".join([a.get("name","") for a in authors_list if a]).strip()
+        author = (authors_list[0].get("name", "").strip() if authors_list else "")
 
         # Subjects -> Genre
         subjects = ", ".join([s.get("name","") for s in data.get("subjects", []) if s])
@@ -571,38 +571,21 @@ with st.expander("✍️ Add a New Book Manually", expanded=False):
             else:
                 st.warning("Enter both a title and author to add a book.")
 
-# --- Barcode scanner (from image or camera) ---
+# --- Barcode scanner (from image) ---
 if zbar_decode:
-    with st.expander("📷 Scan Barcode", expanded=False):
-        mode = st.radio("Choose a scan method:", ["Upload a photo", "Use my camera"], horizontal=True)
-        img = None
-        if mode == "Upload a photo":
-            up = st.file_uploader("Upload a clear photo of the barcode", type=["png", "jpg", "jpeg"])
-            if up:
-                try:
-                    img = Image.open(up)
-                    if img.mode != "RGB":
-                        img = img.convert("RGB")
-                except Exception:
-                    img = None
-        else:
-            cam = st.camera_input("Point your camera at the barcode and take a photo")
-            if cam is not None:
-                try:
-                    img = Image.open(cam)
-                    if img.mode != "RGB":
-                        img = img.convert("RGB")
-                except Exception:
-                    img = None
-        
-        if img is not None:
+    with st.expander("📷 Scan Barcode from Photo", expanded=False):
+        up = st.file_uploader("Upload a clear photo of the barcode", type=["png", "jpg", "jpeg"])
+        if up:
             try:
+                img = Image.open(up)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
                 codes = zbar_decode(img)
             except Exception:
                 codes = []
 
             if not codes:
-                st.warning("No barcode found. Try a closer, sharper photo with good lighting.")
+                st.warning("No barcode found. Please try a closer, sharper photo.")
             else:
                 raw = codes[0].data.decode(errors="ignore")
                 # extract last 13 digits if present
@@ -636,7 +619,8 @@ if zbar_decode:
 
                     full_desc = meta.get("Description", "")
                     if full_desc:
-                        lines = full_desc.split('\n')
+                        lines = full_desc.split('
+')
                         if len(lines) > 5 or len(full_desc) > 500:
                             with st.expander("Description (click to expand)"):
                                 st.write(full_desc)
@@ -820,6 +804,9 @@ with tabs[3]:
                             st.error(f"Could not add: {e}")
                     st.markdown("---")
                 shown += 1
+
+            if shown >= 5:
+                break
 
             if shown == 0:
                 st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
