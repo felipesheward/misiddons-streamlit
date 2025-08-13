@@ -899,3 +899,99 @@ with st.expander("Diagnostics – help me if it still fails"):
             st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
     except Exception as e:
         st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
+
+# ==== Data Check (Library) =====================================================
+with st.expander("🔍 Data Check — Library", expanded=False):
+    lib = load_data("Library")
+
+    if lib.empty:
+        st.info("Library sheet is empty.")
+    else:
+        # Ensure expected columns exist
+        for c in ["ISBN", "Title", "Author", "Language", "Thumbnail", "PublishedDate", "Date Read", "Description"]:
+            if c not in lib.columns:
+                lib[c] = ""
+
+        # Normalizations
+        lib["_isbn_norm"]   = lib["ISBN"].astype(str).map(_normalize_isbn)
+        lib["_author_primary"] = lib["Author"].astype(str).map(keep_primary_author)
+        lib["_title_norm"]  = lib["Title"].astype(str).str.strip().str.lower()
+        lib["_ta_key"]      = lib["_title_norm"] + " | " + lib["_author_primary"].str.strip().str.lower()
+
+        # Checks
+        issues = []
+
+        # 1) Title/Author missing
+        mask_missing = (lib["Title"].astype(str).str.strip() == "") | (lib["Author"].astype(str).str.strip() == "")
+        for i, r in lib[mask_missing].iterrows():
+            issues.append({
+                "Row": i+2,  # account for header row
+                "Issue": "Missing Title or Author",
+                "Title": r["Title"], "Author": r["Author"], "ISBN": r["ISBN"],
+                "Suggestion": "Fill in missing field(s)."
+            })
+
+        # 2) Author not reduced to primary
+        mask_author_multi = lib["Author"].astype(str) != lib["_author_primary"]
+        for i, r in lib[mask_author_multi].iterrows():
+            issues.append({
+                "Row": i+2,
+                "Issue": "Author list not normalized",
+                "Title": r["Title"], "Author": r["Author"], "ISBN": r["ISBN"],
+                "Suggestion": f"Use primary author → '{r['_author_primary']}'."
+            })
+
+        # 3) Duplicate ISBNs (non-empty)
+        dup_isbn = lib[lib["_isbn_norm"] != ""]
+        dup_isbn = dup_isbn[dup_isbn["_isbn_norm"].duplicated(keep=False)].sort_values("_isbn_norm")
+        for i, r in dup_isbn.iterrows():
+            issues.append({
+                "Row": i+2,
+                "Issue": "Duplicate ISBN",
+                "Title": r["Title"], "Author": r["_author_primary"], "ISBN": r["ISBN"],
+                "Suggestion": "Remove duplicate or correct ISBN."
+            })
+
+        # 4) Duplicate Title+Author (case-insensitive)
+        dup_ta = lib[lib["_ta_key"].duplicated(keep=False)].sort_values("_ta_key")
+        for i, r in dup_ta.iterrows():
+            issues.append({
+                "Row": i+2,
+                "Issue": "Duplicate Title+Author",
+                "Title": r["Title"], "Author": r["_author_primary"], "ISBN": r["ISBN"],
+                "Suggestion": "Remove duplicate row."
+            })
+
+        # 5) Non-HTTPS cover URLs
+        bad_thumb = lib["Thumbnail"].astype(str).str.startswith("http://", na=False)
+        for i, r in lib[bad_thumb].iterrows():
+            issues.append({
+                "Row": i+2,
+                "Issue": "Insecure cover URL (http)",
+                "Title": r["Title"], "Author": r["_author_primary"], "ISBN": r["ISBN"],
+                "Suggestion": "Switch to https:// thumbnail."
+            })
+
+        # 6) Date Read format check
+        date_mask = lib["Date Read"].astype(str).str.strip() != ""
+        bad_date = ~lib.loc[date_mask, "Date Read"].astype(str).str.match(r"^\d{4}/\d{2}/\d{2}$", na=False)
+        for i, r in lib.loc[date_mask].loc[bad_date].iterrows():
+            issues.append({
+                "Row": i+2,
+                "Issue": "Date Read format",
+                "Title": r["Title"], "Author": r["_author_primary"], "ISBN": r["ISBN"],
+                "Suggestion": "Use YYYY/MM/DD."
+            })
+
+        # Summary metrics
+        st.metric("Rows in Library", len(lib))
+        st.metric("Unique ISBNs", int((lib["_isbn_norm"] != "").sum() - lib.loc[lib["_isbn_norm"] != "", "_isbn_norm"].duplicated().sum()))
+        st.metric("Unique Title+Author", int(lib["_ta_key"].nunique()))
+
+        # Show problems (if any)
+        if issues:
+            prob_df = pd.DataFrame(issues, columns=["Row","Issue","Title","Author","ISBN","Suggestion"])
+            st.warning(f"Found {len(prob_df)} potential issue(s).")
+            st.dataframe(prob_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("Looks good! No issues detected in Library 🎉")
