@@ -1037,17 +1037,18 @@ def _strip_diacritics(s: str) -> str:
 
 def _norm_title(s: str) -> str:
     s = _strip_diacritics(str(s))
-    s = re.split(r"[:(\[]", s, 1)[0]           # drop subtitle/series
+    s = re.split(r"[:\(\[]", s, 1)[0]          # drop subtitle/series after : ( or [
     s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
-    s = re.sub(r"\s+", " ").strip()
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def _norm_author(s: str) -> str:
-    s = keep_primary_author(str(s))             # your helper (keeps 1st author)
+    s = keep_primary_author(str(s))
     s = _strip_diacritics(s).replace("&", "and")
     s = re.sub(r"[^a-z ]+", " ", s.lower())
-    s = re.sub(r"\s+", " ").strip()
+    s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 @st.cache_data(ttl=86400)
 def _search_google_by_title(title: str, max_results: int = 3) -> list[dict]:
@@ -1155,7 +1156,13 @@ with st.expander("🔎 Cross-check & Fix — Titles and Authors (Library)", expa
             t_kind = title_match_kind(t_sheet, best.get("Title",""))
             a_kind = author_match_kind(a_sheet, best.get("Author",""))
 
-            if (t_kind != "exact") or (a_kind != "exact"):
+            author_diff_exists = any(
+    SequenceMatcher(None, _norm_title(t_sheet), _norm_title(c.get("Title",""))).ratio() >= 0.90
+    and _norm_author(c.get("Author","")) != _norm_author(a_sheet)
+    for c in cands
+)
+if (t_kind != "exact") or (a_kind != "exact") or author_diff_exists:
+
                 found_any = True
                 # Build choices
                 options = [("Keep current", {"Title": t_sheet, "Author": a_sheet, "source": "sheet"})]
