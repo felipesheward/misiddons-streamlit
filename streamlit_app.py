@@ -3,7 +3,7 @@
 """
 Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
-- Scan barcodes from a photo OR your camera to auto‑fill metadata (title, author, cover, description)
+- Scan barcodes from a photo to auto‑fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
 - ENHANCEMENTS (this build):
@@ -16,7 +16,7 @@ Misiddons Book Database – Streamlit app (Form + Scanner)
     - Authors' names with special characters handled
     - Statistics (metrics only, no chart)
     - Extra robustness in Google/OpenLibrary fetchers
-    - Camera scanner via st.camera_input (mobile-friendly)
+    - Photo upload barcode scanner
 """
 from __future__ import annotations
 
@@ -166,6 +166,20 @@ def _normalize_isbn(s: str) -> str:
         return ""
     return "".join(ch for ch in str(s).replace("'", "") if ch.isdigit())
 
+def keep_primary_author(author: str) -> str:
+    s = (author or "").strip()
+    if not s:
+        return ""
+    # If it's clearly a list of multiple people separated by commas (3+ parts), keep the first chunk
+    if s.count(',') >= 2:
+        return s.split(',')[0].strip()
+    # Trim lists joined by ' and ' or ' & '
+    if ' and ' in s:
+        return s.split(' and ')[0].strip()
+    if ' & ' in s:
+        return s.split(' & ')[0].strip()
+    return s
+
 @st.cache_data(ttl=86400)
 def _ol_fetch_json(url: str) -> dict:
     try:
@@ -222,7 +236,7 @@ def get_book_details_google(isbn: str) -> dict:
             thumb = thumb.replace("http://", "https://")
         cats = info.get("categories") or []
         authors = info.get("authors") or []
-        author = (authors[0].strip() if authors else "")
+        author = keep_primary_author(authors[0].strip()) if authors else ""
 
         return {
             "ISBN": isbn,
@@ -253,7 +267,7 @@ def get_book_details_openlibrary(isbn: str) -> dict:
 
         # Author(s)
         authors_list = data.get("authors", [])
-        author = (authors_list[0].get("name", "").strip() if authors_list else "")
+        author = keep_primary_author(authors_list[0].get("name", "").strip()) if authors_list else ""
 
         # Subjects -> Genre
         subjects = ", ".join([s.get("name","") for s in data.get("subjects", []) if s])
@@ -362,6 +376,8 @@ def get_book_metadata(isbn: str) -> dict:
     # Known name fix
     if meta.get("Author") == "Jø Lier Horst":
         meta["Author"] = "Jørn Lier Horst"
+
+    meta["Author"] = keep_primary_author(meta.get("Author", ""))
 
     return meta
 
