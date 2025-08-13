@@ -3,19 +3,24 @@
 """
 Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
-- Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
+- Scan barcodes from a photo OR your camera to auto‑fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
-- ENHANCEMENTS:
+- ENHANCEMENTS (this build):
     - Search bar for filtering books
     - Improved feedback messages
-    - Recommendations filter out owned books (now fixed, with Google + OpenLibrary fallback)
+    - Recommendations: two modes
+        • By author (Google first, OpenLibrary fallback, filters out owned)
+        • Surprise me (4 random unseen picks across your authors)
     - More readable DataFrame display
-    - Authors' names with special characters are handled correctly
-    - Statistics section (metrics only, chart removed)
+    - Authors' names with special characters handled
+    - Statistics (metrics only, no chart)
+    - Extra robustness in Google/OpenLibrary fetchers
+    - Camera scanner via st.camera_input (mobile-friendly)
 """
 from __future__ import annotations
 
+import random
 import pandas as pd
 import requests
 import streamlit as st
@@ -28,18 +33,18 @@ from gspread.exceptions import APIError, WorksheetNotFound
 # Optional barcode support
 try:
     from pyzbar.pyzbar import decode as zbar_decode
-except Exception:
+except Exception:  # pyzbar/libzbar not available in some envs
     zbar_decode = None
 
 # ---------- CONFIG ----------
 DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
 SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
-GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")
+GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")  # only used if no ID
 GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
-UA = {"User-Agent": "misiddons/1.0"}
+UA = {"User-Agent": "misiddons/1.1"}
 
 # ---------- Google Sheets helpers ----------
 @st.cache_resource
@@ -64,7 +69,6 @@ def load_data(worksheet: str) -> pd.DataFrame:
     client_local = connect_to_gsheets()
     if not client_local:
         return pd.DataFrame()
-    ss = None
     try:
         ss = client_local.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else client_local.open(GOOGLE_SHEET_NAME)
         target = worksheet.strip()
@@ -77,6 +81,7 @@ def load_data(worksheet: str) -> pd.DataFrame:
                 ws = ss.worksheet(norm[target.strip().casefold()])
             else:
                 raise
+        # Try fast path first
         try:
             df = pd.DataFrame(ws.get_all_records())
             return df.dropna(how="all")
@@ -88,6 +93,8 @@ def load_data(worksheet: str) -> pd.DataFrame:
             return pd.DataFrame(rows, columns=header).dropna(how="all")
     except WorksheetNotFound:
         try:
+            client = connect_to_gsheets()
+            ss = client.open_by_key(SPREADSHEET_ID) if client and SPREADSHEET_ID else None
             tabs = [w.title for w in ss.worksheets()] if ss else []
         except Exception:
             tabs = []
@@ -101,8 +108,8 @@ def load_data(worksheet: str) -> pd.DataFrame:
         st.error(f"Unexpected error loading '{worksheet}': {type(e).__name__}: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=60)
 def _get_ws(tab: str):
+    """Return a Worksheet handle. (No caching; gspread objects aren't reliably cacheable.)"""
     client = connect_to_gsheets()
     if not client:
         return None
@@ -219,7 +226,7 @@ def get_book_details_google(isbn: str) -> dict:
 
         return {
             "ISBN": isbn,
-            "Title": info.get("title", "").strip(),
+            "Title": (info.get("title", "") or "").strip(),
             "Author": author,
             "Genre": ", ".join(cats) if cats else "",
             "Language": (info.get("language") or "").upper(),
@@ -358,7 +365,7 @@ def get_book_metadata(isbn: str) -> dict:
 
     return meta
 
-# ---------- Recommendations (fixed: Google first, OL fallback) ----------
+# ---------- Recommendations (two modes) ----------
 @st.cache_data(ttl=86400)
 def get_recommendations_by_author(author: str) -> list[dict]:
     if not author:
@@ -372,7 +379,7 @@ def get_recommendations_by_author(author: str) -> list[dict]:
             params["key"] = GOOGLE_BOOKS_KEY
         r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
         if r.ok:
-            for item in r.json().get("items", []):
+            for item in r.json().get("items", []) or []:
                 vi = item.get("volumeInfo", {})
                 isbn = ""
                 for ident in vi.get("industryIdentifiers", []) or []:
@@ -432,6 +439,7 @@ def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
     if url:
         return url, title or ""
     txt = quote((title or "No Cover").upper())
+    # Center text in placeholder by adding some line breaks
     placeholder = f"https://via.placeholder.com/300x450?text={txt}"
     return placeholder, (title or "No Cover")
 
@@ -497,14 +505,13 @@ def append_record(tab: str, record: dict) -> None:
 st.title("Misiddons Book Database")
 
 # Initialize session state for form and scanner if not present
-if "scan_isbn" not in st.session_state:
-    st.session_state["scan_isbn"] = ""
-if "scan_title" not in st.session_state:
-    st.session_state["scan_title"] = ""
-if "scan_author" not in st.session_state:
-    st.session_state["scan_author"] = ""
-if "last_scan_meta" not in st.session_state:
-    st.session_state["last_scan_meta"] = {}
+for k, v in {
+    "scan_isbn": "",
+    "scan_title": "",
+    "scan_author": "",
+    "last_scan_meta": {},
+}.items():
+    st.session_state.setdefault(k, v)
 
 # --- Add Book Form ---
 with st.expander("✍️ Add a New Book Manually", expanded=False):
@@ -555,9 +562,8 @@ with st.expander("✍️ Add a New Book Manually", expanded=False):
                         append_record(choice, rec)
                         st.success(f"Added '{title}' to {choice} 🎉")
                         # Clear session state
-                        st.session_state["scan_isbn"] = ""
-                        st.session_state["scan_title"] = ""
-                        st.session_state["scan_author"] = ""
+                        for k in ("scan_isbn","scan_title","scan_author"):
+                            st.session_state[k] = ""
                         st.session_state["last_scan_meta"] = {}
                         st.rerun()
                 except Exception as e:
@@ -565,21 +571,38 @@ with st.expander("✍️ Add a New Book Manually", expanded=False):
             else:
                 st.warning("Enter both a title and author to add a book.")
 
-# --- Barcode scanner (from image) ---
+# --- Barcode scanner (from image or camera) ---
 if zbar_decode:
-    with st.expander("📷 Scan Barcode from Photo", expanded=False):
-        up = st.file_uploader("Upload a clear photo of the barcode", type=["png", "jpg", "jpeg"])
-        if up:
+    with st.expander("📷 Scan Barcode", expanded=False):
+        mode = st.radio("Choose a scan method:", ["Upload a photo", "Use my camera"], horizontal=True)
+        img = None
+        if mode == "Upload a photo":
+            up = st.file_uploader("Upload a clear photo of the barcode", type=["png", "jpg", "jpeg"])
+            if up:
+                try:
+                    img = Image.open(up)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                except Exception:
+                    img = None
+        else:
+            cam = st.camera_input("Point your camera at the barcode and take a photo")
+            if cam is not None:
+                try:
+                    img = Image.open(cam)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                except Exception:
+                    img = None
+        
+        if img is not None:
             try:
-                img = Image.open(up)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
                 codes = zbar_decode(img)
             except Exception:
                 codes = []
 
             if not codes:
-                st.warning("No barcode found. Please try a closer, sharper photo.")
+                st.warning("No barcode found. Try a closer, sharper photo with good lighting.")
             else:
                 raw = codes[0].data.decode(errors="ignore")
                 # extract last 13 digits if present
@@ -626,9 +649,8 @@ if zbar_decode:
                             try:
                                 append_record("Library", meta)
                                 st.success("Added to Library 🎉")
-                                st.session_state["scan_isbn"] = ""
-                                st.session_state["scan_title"] = ""
-                                st.session_state["scan_author"] = ""
+                                for k in ("scan_isbn","scan_title","scan_author"):
+                                    st.session_state[k] = ""
                                 st.session_state["last_scan_meta"] = {}
                                 st.rerun()
                             except Exception:
@@ -638,15 +660,14 @@ if zbar_decode:
                             try:
                                 append_record("Wishlist", meta)
                                 st.success("Added to Wishlist 📝")
-                                st.session_state["scan_isbn"] = ""
-                                st.session_state["scan_title"] = ""
-                                st.session_state["scan_author"] = ""
+                                for k in ("scan_isbn","scan_title","scan_author"):
+                                    st.session_state[k] = ""
                                 st.session_state["last_scan_meta"] = {}
                                 st.rerun()
                             except Exception:
                                 pass
 else:
-    st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable, paste the ISBN manually.")
+    st.info("Barcode scanning requires `pyzbar`/`zbar`. If unavailable, paste the ISBN manually or use the manual form.")
 
 st.divider()
 
@@ -706,11 +727,14 @@ with tabs[2]:
     library_df = load_data("Library")
     wishlist_df = load_data("Wishlist")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Books in Library", len(library_df))
     with col2:
         st.metric("Total Books on Wishlist", len(wishlist_df))
+    with col3:
+        uniq_auth = 0 if library_df.empty or "Author" not in library_df.columns else library_df["Author"].fillna("").astype(str).str.split(",").explode().str.strip().replace({"": None}).dropna().nunique()
+        st.metric("Unique Authors (Library)", int(uniq_auth))
 
     # Per request: no chart in Statistics
 
@@ -719,6 +743,17 @@ with tabs[3]:
     library_df = load_data("Library")
     wishlist_df = load_data("Wishlist")
 
+    # Collect owned titles/ISBNs to filter out
+    owned_titles = set()
+    owned_isbns = set()
+    for df in (library_df, wishlist_df):
+        if not df.empty:
+            if "Title" in df.columns:
+                owned_titles.update(df["Title"].dropna().astype(str).str.lower().str.strip().tolist())
+            if "ISBN" in df.columns:
+                owned_isbns.update(df["ISBN"].dropna().astype(str).map(_normalize_isbn).tolist())
+
+    # Build author list from Library
     authors = []
     if not library_df.empty and "Author" in library_df.columns:
         authors = (
@@ -734,67 +769,119 @@ with tabs[3]:
         )
         authors = sorted(set(authors), key=lambda s: s.lower())
 
-    if authors:
-        selected_author = st.selectbox("Find books by authors you've read:", authors)
-    else:
-        selected_author = st.text_input("Type an author to get recommendations:")
+    mode = st.radio("Recommendation mode:", ["Surprise me (4 random unseen)", "By author"], horizontal=True)
 
-    if selected_author:
-        recommendations = get_recommendations_by_author(selected_author)
+    if mode == "By author":
+        if authors:
+            selected_author = st.selectbox("Find books by authors you've read:", authors)
+        else:
+            selected_author = st.text_input("Type an author to get recommendations:")
 
-        # Owned titles/ISBNs to filter out
-        owned_titles = set()
-        owned_isbns = set()
-        for df in (library_df, wishlist_df):
-            if not df.empty:
-                if "Title" in df.columns:
-                    owned_titles.update(df["Title"].dropna().astype(str).str.lower().str.strip().tolist())
-                if "ISBN" in df.columns:
-                    owned_isbns.update(df["ISBN"].dropna().astype(str).map(_normalize_isbn).tolist())
+        if selected_author:
+            recommendations = get_recommendations_by_author(selected_author)
 
-        shown = 0
-        for item in recommendations:
-            title = (item.get("title") or "").strip()
-            isbn = _normalize_isbn(item.get("isbn", ""))
-            if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
-                continue
+            shown = 0
+            for item in recommendations:
+                title = (item.get("title") or "").strip()
+                isbn = _normalize_isbn(item.get("isbn", ""))
+                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
+                    continue
 
-            cols = st.columns([1, 4])
-            with cols[0]:
-                thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
-                st.image(thumb, width=100)
-            with cols[1]:
-                st.subheader(title or "No Title")
-                st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
-                st.write(f"**Published:** {item.get('published', 'N/A')}")
-                if item.get("description"):
-                    st.caption(item["description"])
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
+                    st.image(thumb, width=100)
+                with cols[1]:
+                    st.subheader(title or "No Title")
+                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
+                    st.write(f"**Published:** {item.get('published', 'N/A')}")
+                    if item.get("description"):
+                        st.caption(item["description"]) 
 
-                # Add to Wishlist button per recommendation
-                add_key = f"rec_add_{selected_author}_{shown}"
-                if st.button("🧾 Add to Wishlist", key=add_key):
-                    rec_meta = {
-                        "ISBN": isbn,
-                        "Title": title,
-                        "Author": item.get("authors", ""),
-                        "Genre": "",
-                        "Language": "",
-                        "Thumbnail": item.get("thumbnail", ""),
-                        "Description": (item.get("description") or ""),
-                        "Rating": "",
-                        "PublishedDate": item.get("published", ""),
-                    }
-                    try:
-                        append_record("Wishlist", rec_meta)
-                        st.success(f"Added '{title}' to Wishlist")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Could not add: {e}")
+                    # Add to Wishlist button per recommendation
+                    add_key = f"rec_add_{selected_author}_{shown}"
+                    if st.button("🧾 Add to Wishlist", key=add_key):
+                        rec_meta = {
+                            "ISBN": isbn,
+                            "Title": title,
+                            "Author": item.get("authors", ""),
+                            "Genre": "",
+                            "Language": "",
+                            "Thumbnail": item.get("thumbnail", ""),
+                            "Description": (item.get("description") or ""),
+                            "Rating": "",
+                            "PublishedDate": item.get("published", ""),
+                        }
+                        try:
+                            append_record("Wishlist", rec_meta)
+                            st.success(f"Added '{title}' to Wishlist")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not add: {e}")
+                    st.markdown("---")
+                shown += 1
+
+            if shown == 0:
+                st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
+
+    else:  # Surprise me (4 random unseen)
+        if not authors:
+            st.info("Add at least one book with an author to your Library to get surprise recommendations.")
+        else:
+            # Sample up to 6 authors to widen variety
+            sample_authors = random.sample(authors, k=min(6, len(authors)))
+            pool: list[dict] = []
+            for a in sample_authors:
+                pool.extend(get_recommendations_by_author(a))
+            # Filter out owned and blanks
+            filtered = []
+            for item in pool:
+                title = (item.get("title") or "").strip()
+                isbn = _normalize_isbn(item.get("isbn", ""))
+                if not title:
+                    continue
+                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
+                    continue
+                filtered.append(item)
+            random.shuffle(filtered)
+            picks = filtered[:4]
+
+            if not picks:
+                st.info("Couldn't find unseen picks right now. Try switching to 'By author' mode.")
+            for idx, item in enumerate(picks, 1):
+                title = (item.get("title") or "").strip()
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
+                    st.image(thumb, width=100)
+                with cols[1]:
+                    st.subheader(f"{idx}. {title or 'No Title'}")
+                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
+                    st.write(f"**Published:** {item.get('published', 'N/A')}")
+                    if item.get("description"):
+                        st.caption(item["description"]) 
+
+                    isbn = _normalize_isbn(item.get("isbn", ""))
+                    add_key = f"rec_surprise_add_{idx}"
+                    if st.button("🧾 Add to Wishlist", key=add_key):
+                        rec_meta = {
+                            "ISBN": isbn,
+                            "Title": title,
+                            "Author": item.get("authors", ""),
+                            "Genre": "",
+                            "Language": "",
+                            "Thumbnail": item.get("thumbnail", ""),
+                            "Description": (item.get("description") or ""),
+                            "Rating": "",
+                            "PublishedDate": item.get("published", ""),
+                        }
+                        try:
+                            append_record("Wishlist", rec_meta)
+                            st.success(f"Added '{title}' to Wishlist")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not add: {e}")
                 st.markdown("---")
-            shown += 1
-
-        if shown == 0:
-            st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
 
 # ---- Diagnostics (safe to show) ----
 with st.expander("Diagnostics – help me if it still fails"):
