@@ -3,14 +3,14 @@
 """
 Misiddons Book Database – Streamlit app (Form + Scanner)
 - Add books manually via form
-- Scan barcodes from a photo to auto-fill metadata (title, author, cover, description)
+- Scan barcodes from a photo to auto‑fill metadata (title, author, cover, description)
 - Add to Library or Wishlist
 - Prevents duplicates (by ISBN or Title+Author)
 - ENHANCEMENTS (this build):
     - Search bar for filtering books
     - Improved feedback messages
     - Recommendations: two modes
-        • By author (Google first, OpenLibrary fallback, filters out owned, show up to 5)
+        • By author (Google first, OpenLibrary fallback, filters out owned)
         • Surprise me (4 random unseen picks across your authors)
     - More readable DataFrame display
     - Authors' names with special characters handled
@@ -44,70 +44,6 @@ GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
-# ── Design mockups (themes) ---------------------------------------------------
-def inject_theme(theme: str):
-    base = """
-    <style>
-    :root { --radius: 18px; }
-    [data-testid="stAppViewContainer"] { background: var(--bg); }
-    [data-testid="stHeader"] { background: transparent; }
-    h1,h2,h3 { letter-spacing: -0.02em; }
-    .stButton>button { border-radius: var(--radius); padding: .6rem 1rem; border: none; transition: all .18s ease; }
-    div[data-testid="stExpander"] { border-radius: var(--radius); }
-    img { border-radius: 14px; }
-    </style>
-    """
-    themes = {
-        "A • Minimal Light": """
-        <style>
-        :root{ --bg:#F7F8FB; --text:#0F172A; --muted:#64748B; --accent:#2563EB; --card:#FFFFFF; }
-        html, body, [data-testid="stAppViewContainer"]{background:var(--bg); color:var(--text);}
-        .stButton>button{ background:var(--accent); color:#fff; box-shadow:0 6px 18px rgba(37,99,235,.28)}
-        .stButton>button:hover{ transform:translateY(-1px); box-shadow:0 10px 26px rgba(37,99,235,.38)}
-        div[data-testid="stExpander"]{ background:var(--card); border:1px solid rgba(0,0,0,.06); }
-        .stTextInput>div>div>input, .stSelectbox>div>div>div{ background:#fff; border-radius:12px; }
-        </style>
-        """,
-        "B • Glass": """
-        <style>
-        :root{ --bg:linear-gradient(135deg,#e0e7ff, #fdf2f8); --text:#0b1021; --accent:#7c3aed; --card:rgba(255,255,255,.55); }
-        [data-testid="stAppViewContainer"]{ background:var(--bg); }
-        .stButton>button{ background:var(--accent); color:white; box-shadow: 0 10px 30px rgba(124,58,237,.35); backdrop-filter: saturate(140%);}
-        div[data-testid="stExpander"]{ background:var(--card); border:1px solid rgba(255,255,255,.6); backdrop-filter: blur(10px); }
-        img{ box-shadow: 0 10px 30px rgba(0,0,0,.12); }
-        </style>
-        """,
-        "C • Dark Pro": """
-        <style>
-        :root{ --bg:#0b1220; --text:#E5E7EB; --muted:#9CA3AF; --accent:#22d3ee; --card:#0f172a; }
-        html, body, [data-testid="stAppViewContainer"]{ background:var(--bg); color:var(--text); }
-        .stButton>button{ background:var(--accent); color:#0b1220; box-shadow:0 10px 30px rgba(34,211,238,.25); }
-        div[data-testid="stExpander"]{ background:var(--card); border:1px solid rgba(255,255,255,.06); }
-        .stDataFrame, .stMetric, .stTextInput > div > div > input{ color:var(--text)!important; }
-        </style>
-        """,
-        "D • Bookish Sepia": """
-        <style>
-        :root{ --bg:#f7f2e7; --text:#2b2118; --muted:#6b4f3b; --accent:#8b5e34; --card:#fffaf1; }
-        html, body, [data-testid="stAppViewContainer"]{ background:var(--bg); color:var(--text); }
-        h1,h2,h3, .stMarkdown p{ font-family: 'Georgia','Iowan Old Style','Times New Roman',serif; }
-        .stButton>button{ background:var(--accent); color:#fff; box-shadow:0 6px 18px rgba(139,94,52,.28); border-radius: 10px;}
-        div[data-testid="stExpander"]{ background:var(--card); border:1px solid rgba(0,0,0,.08); }
-        img{ box-shadow: 0 6px 20px rgba(139,94,52,.25); }
-        </style>
-        """,
-    }
-    st.markdown(base + themes.get(theme, ""), unsafe_allow_html=True)
-
-with st.sidebar:
-    theme_choice = st.selectbox("Design mockup", [
-        "A • Minimal Light",
-        "B • Glass",
-        "C • Dark Pro",
-        "D • Bookish Sepia",
-    ], index=0)
-
-inject_theme(theme_choice)
 UA = {"User-Agent": "misiddons/1.1"}
 
 # ---------- Google Sheets helpers ----------
@@ -513,15 +449,19 @@ def get_recommendations_by_author(author: str) -> list[dict]:
     return results
 
 # ---------- UI helpers ----------
+
 def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
     url = (url or "").strip()
     if url:
         return url, title or ""
     txt = quote((title or "No Cover").upper())
+    # Center text in placeholder by adding some line breaks
     placeholder = f"https://via.placeholder.com/300x450?text={txt}"
     return placeholder, (title or "No Cover")
 
 # ---------- Sheet writer ----------
+
+
 def append_record(tab: str, record: dict) -> None:
     """Ensure headers, dedupe (ISBN or Title+Author), preserve ISBN as text, then append."""
     try:
@@ -577,36 +517,17 @@ def append_record(tab: str, record: dict) -> None:
         st.error(f"Failed to write to '{tab}': {e}")
         raise
 
-def update_row_fields(tab: str, row_number: int, fields: dict) -> bool:
-    """Update specific columns in a given sheet row (1-based, incl. header row at 1)."""
-    try:
-        ws = _get_ws(tab)
-        if not ws:
-            raise RuntimeError("Worksheet not found")
-        headers = [h.strip() for h in ws.row_values(1)]
-        colmap = {h: i+1 for i, h in enumerate(headers)}
-        row_vals = ws.row_values(row_number)
-        if len(row_vals) < len(headers):
-            row_vals += [""] * (len(headers) - len(row_vals))
-        for k, v in fields.items():
-            # Preserve numeric ISBN as text in Sheets
-            if k == "ISBN" and str(v).isdigit():
-                v = "'" + str(v).strip()
-            if k in colmap:
-                row_vals[colmap[k]-1] = v
-        # Write the full row back starting from column A
-        ws.update(f"A{row_number}", [row_vals])
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Couldn't update row {row_number} in '{tab}': {e}")
-        return False
-
 # ---------- UI ----------
+
 st.title("Misiddons Book Database")
 
 # Initialize session state for form and scanner if not present
-for k, v in {"scan_isbn":"", "scan_title":"", "scan_author":"", "last_scan_meta":{}}.items():
+for k, v in {
+    "scan_isbn": "",
+    "scan_title": "",
+    "scan_author": "",
+    "last_scan_meta": {},
+}.items():
     st.session_state.setdefault(k, v)
 
 # --- Add Book Form ---
@@ -684,6 +605,7 @@ if zbar_decode:
                 st.warning("No barcode found. Please try a closer, sharper photo.")
             else:
                 raw = codes[0].data.decode(errors="ignore")
+                # extract last 13 digits if present
                 digits = "".join(ch for ch in raw if ch.isdigit())
                 isbn_bc = digits[-13:] if len(digits) >= 13 else digits
                 st.info(f"Detected code: {raw} → Using ISBN: {isbn_bc}")
@@ -749,190 +671,235 @@ else:
 
 st.divider()
 
-# ==== Cross-check & Fix — Titles and Authors (Library) =========================
-# PART 1/2 — Helpers (normalizers + candidate fetchers)
-import re, unicodedata
-from difflib import SequenceMatcher
+# --- Tabs ---
+tabs = st.tabs(["Library", "Wishlist", "Statistics", "Recommendations"])
 
-def _strip_diacritics(s: str) -> str:
-    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+with tabs[0]:
+    st.header("My Library")
+    library_df = load_data("Library")
+    if not library_df.empty:
+        search_lib = st.text_input("🔎 Search My Library...", placeholder="Search titles, authors, or genres...", key="lib_search")
 
-def _norm_title(s: str) -> str:
-    # Normalize for fuzzy compare: drop subtitles, punctuation, collapse spaces
-    s = _strip_diacritics(str(s))
-    s = re.split(r"[:\(\[]", s, 1)[0]          # drop after :, ( or [
-    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+        lib_df_display = library_df.copy()
+        if search_lib:
+            lib_df_display = lib_df_display[
+                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
+            ]
 
-def _norm_author(s: str) -> str:
-    # Use your primary-author rule, normalize accents/punct/whitespace
-    s = keep_primary_author(str(s))
-    s = _strip_diacritics(s).replace("&", "and")
-    s = re.sub(r"[^a-z ]+", " ", s.lower())
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-@st.cache_data(ttl=86400)
-def _search_google_by_title(title: str, max_results: int = 3) -> list[dict]:
-    out = []
-    try:
-        params = {"q": f"intitle:{title}", "printType": "books", "maxResults": max_results}
-        if GOOGLE_BOOKS_KEY:
-            params["key"] = GOOGLE_BOOKS_KEY
-        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
-        if r.ok:
-            for item in r.json().get("items", []) or []:
-                vi = item.get("volumeInfo", {})
-                au = (vi.get("authors") or [])
-                out.append({
-                    "source": "google-search",
-                    "Title": (vi.get("title") or "").strip(),
-                    "Author": keep_primary_author(au[0].strip()) if au else ""
-                })
-    except Exception:
-        pass
-    return out
-
-@st.cache_data(ttl=86400)
-def _search_ol_by_title(title: str, limit: int = 5) -> list[dict]:
-    out = []
-    try:
-        r = requests.get("https://openlibrary.org/search.json", params={"title": title, "limit": limit}, timeout=12, headers=UA)
-        if r.ok:
-            for doc in (r.json().get("docs") or [])[:limit]:
-                au = (doc.get("author_name") or [])
-                out.append({
-                    "source": "ol-search",
-                    "Title": (doc.get("title") or "").strip(),
-                    "Author": keep_primary_author(au[0].strip()) if au else ""
-                })
-    except Exception:
-        pass
-    return out
-
-@st.cache_data(ttl=86400)
-def _candidates_from_row(title: str, author: str, isbn: str) -> list[dict]:
-    """
-    Build candidates without trusting a possibly-wrong sheet author.
-    Order: Google via ISBN → OpenLibrary via ISBN → Google title-search → OL title-search.
-    """
-    cand: list[dict] = []
-    isbn_norm = _normalize_isbn(isbn)
-    if isbn_norm:
-        g = get_book_details_google(isbn_norm)
-        if g.get("Title"):
-            cand.append({"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]})
-        o = get_book_details_openlibrary(isbn_norm)
-        if o.get("Title"):
-            cand.append({"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]})
-
-    # Title-only searches (do NOT include sheet author; prevents reinforcing a wrong author)
-    cand.extend(_search_google_by_title(title, 3))
-    cand.extend(_search_ol_by_title(title, 5))
-
-    # Deduplicate by normalized Title+Author
-    seen = set(); uniq = []
-    for c in cand:
-        key = (_norm_title(c.get("Title","")), _norm_author(c.get("Author","")))
-        if key not in seen and (c.get("Title") or c.get("Author")):
-            seen.add(key); uniq.append(c)
-    return uniq
-
-# PART 2/2 — UI (numbered items, accept/skip each, apply per row)
-with st.expander("🔎 Cross-check & Fix — Titles and Authors (Library)", expanded=False):
-    lib = load_data("Library")
-    if lib.empty:
-        st.info("Library sheet is empty.")
+        st.dataframe(
+            lib_df_display,
+            use_container_width=True,
+            column_config={
+                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
+                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
+            },
+            hide_index=True
+        )
     else:
-        for c in ["ISBN", "Title", "Author"]:
-            if c not in lib.columns:
-                lib[c] = ""
+        st.info("Your library is empty. Add a book to get started!")
 
-        found_any = False
-        for i, r in lib.iterrows():
-            rownum = i + 2  # header row is 1
-            t_sheet = str(r["Title"]).strip()
-            a_sheet = str(r["Author"]).strip()
-            i_sheet = str(r["ISBN"]).strip()
-            if not t_sheet and not a_sheet:
-                continue
+with tabs[1]:
+    st.header("My Wishlist")
+    wishlist_df = load_data("Wishlist")
+    if not wishlist_df.empty:
+        search_wish = st.text_input("🔎 Search My Wishlist...", placeholder="Search titles, authors, or genres...", key="wish_search")
 
-            cands = _candidates_from_row(t_sheet, a_sheet, i_sheet)
-            if not cands:
-                continue
+        wish_df_display = wishlist_df.copy()
+        if search_wish:
+            wish_df_display = wish_df_display[
+                wish_df_display.apply(lambda row: row.astype(str).str.contains(search_wish, case=False, na=False).any(), axis=1)
+            ]
 
-            # Score best by normalized title similarity
-            def score(c):
-                return SequenceMatcher(None, _norm_title(t_sheet), _norm_title(c.get("Title",""))).ratio()
-            best = max(cands, key=score, default={})
-            if not best:
-                continue
+        st.dataframe(
+            wish_df_display,
+            use_container_width=True,
+            column_config={
+                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
+                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
+            },
+            hide_index=True
+        )
+    else:
+        st.info("Your wishlist is empty. Scan a book or add one manually!")
 
-            def title_match_kind(s, c):
-                if s.strip() == c.strip():
-                    return "exact"
-                r = SequenceMatcher(None, _norm_title(s), _norm_title(c)).ratio()
-                return "close" if r >= 0.85 else "diff"
+with tabs[2]:
+    st.header("Statistics")
+    library_df = load_data("Library")
+    wishlist_df = load_data("Wishlist")
 
-            def author_match_kind(s, c):
-                s1, c1 = _norm_author(s), _norm_author(c)
-                if s1 == c1 and s1 != "":
-                    return "exact"
-                r = SequenceMatcher(None, s1, c1).ratio() if c1 else 0.0
-                return "close" if r >= 0.85 else "diff"
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Books in Library", len(library_df))
+    with col2:
+        st.metric("Total Books on Wishlist", len(wishlist_df))
+    with col3:
+        uniq_auth = 0 if library_df.empty or "Author" not in library_df.columns else library_df["Author"].fillna("").astype(str).str.split(",").explode().str.strip().replace({"": None}).dropna().nunique()
+        st.metric("Unique Authors (Library)", int(uniq_auth))
 
-            t_kind = title_match_kind(t_sheet, best.get("Title",""))
-            a_kind = author_match_kind(a_sheet, best.get("Author",""))
+    # Per request: no chart in Statistics
 
-            # Extra guard: any very-close title with different author? (catches misattribution like “Anne Bruce”)
-            author_diff_exists = any(
-                SequenceMatcher(None, _norm_title(t_sheet), _norm_title(c.get("Title",""))).ratio() >= 0.90
-                and _norm_author(c.get("Author","")) != _norm_author(a_sheet)
-                for c in cands
-            )
+with tabs[3]:
+    st.header("Recommendations")
+    library_df = load_data("Library")
+    wishlist_df = load_data("Wishlist")
 
-            if (t_kind != "exact") or (a_kind != "exact") or author_diff_exists:
-                found_any = True
+    # Collect owned titles/ISBNs to filter out
+    owned_titles = set()
+    owned_isbns = set()
+    for df in (library_df, wishlist_df):
+        if not df.empty:
+            if "Title" in df.columns:
+                owned_titles.update(df["Title"].dropna().astype(str).str.lower().str.strip().tolist())
+            if "ISBN" in df.columns:
+                owned_isbns.update(df["ISBN"].dropna().astype(str).map(_normalize_isbn).tolist())
 
-                # Choices: Keep current + each candidate
-                options = [("Keep current", {"Title": t_sheet, "Author": a_sheet, "source": "sheet"})]
-                for c in cands:
-                    label = f"{c['source']}: {c['Title']} — {c['Author']}"
-                    options.append((label, c))
+    # Build author list from Library
+    authors = []
+    if not library_df.empty and "Author" in library_df.columns:
+        authors = (
+            library_df["Author"].dropna()
+            .astype(str)
+            .str.split(",")
+            .explode()
+            .str.strip()
+            .replace({"": None})
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        authors = sorted(set(authors), key=lambda s: s.lower())
 
-                idx = i + 1  # numbering key
-                st.markdown(f"**{idx}. Row {rownum}**")
-                st.caption(f"Sheet: {t_sheet} — {a_sheet}")
+    mode = st.radio("Recommendation mode:", ["Surprise me (4 random unseen)", "By author"], horizontal=True)
 
-                choice = st.selectbox(
-                    "Choose correction:",
-                    options=[lbl for lbl, _ in options],
-                    key=f"cc_choice_{idx}"
-                )
-                chosen = dict(options[[lbl for lbl, _ in options].index(choice)][1])
+    if mode == "By author":
+        if authors:
+            selected_author = st.selectbox("Find books by authors you've read:", authors)
+        else:
+            selected_author = st.text_input("Type an author to get recommendations:")
 
-                apply_title  = st.checkbox("Update title",  value=(t_kind != "exact"), key=f"cc_t_{idx}")
-                apply_author = st.checkbox("Update author", value=(a_kind != "exact" or author_diff_exists), key=f"cc_a_{idx}")
+        if selected_author:
+            recommendations = get_recommendations_by_author(selected_author)
 
-                cols_fix = st.columns([1,1,2])
-                with cols_fix[2]:
-                    if st.button(f"Apply update #{idx}", key=f"btn_fix_{idx}"):
-                        fields = {}
-                        if apply_title:
-                            fields["Title"]  = chosen.get("Title","")
-                        if apply_author:
-                            fields["Author"] = chosen.get("Author","")
-                        if not fields:
-                            st.info("Nothing selected to update.")
-                        else:
-                            ok = update_row_fields("Library", rownum, fields)
-                            if ok:
-                                st.success(f"Row {rownum} updated.")
-                                st.rerun()
+            shown = 0
+            for item in recommendations:
+                title = (item.get("title") or "").strip()
+                isbn = _normalize_isbn(item.get("isbn", ""))
+                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
+                    continue
 
-        if not found_any:
-            st.success("All titles & authors look good 🎯")
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
+                    st.image(thumb, width=100)
+                with cols[1]:
+                    st.subheader(title or "No Title")
+                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
+                    st.write(f"**Published:** {item.get('published', 'N/A')}")
+                    if item.get("description"):
+                        st.caption(item["description"]) 
+
+                    # Add to Wishlist button per recommendation
+                    add_key = f"rec_add_{selected_author}_{shown}"
+                    if st.button("🧾 Add to Wishlist", key=add_key):
+                        rec_meta = {
+                            "ISBN": isbn,
+                            "Title": title,
+                            "Author": item.get("authors", ""),
+                            "Genre": "",
+                            "Language": "",
+                            "Thumbnail": item.get("thumbnail", ""),
+                            "Description": (item.get("description") or ""),
+                            "Rating": "",
+                            "PublishedDate": item.get("published", ""),
+                        }
+                        try:
+                            append_record("Wishlist", rec_meta)
+                            st.success(f"Added '{title}' to Wishlist")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not add: {e}")
+                    st.markdown("---")
+                shown += 1
+                if shown >= 5:
+                    break
+
+            if shown == 0:
+                st.info("No new recommendations found (everything shown is already in your Library/Wishlist or nothing was returned by the sources). Try another author.")
+
+    else:  # Surprise me (4 random unseen)
+        if not authors:
+            st.info("Add at least one book with an author to your Library to get surprise recommendations.")
+        else:
+            # Sample up to 6 authors to widen variety
+            sample_authors = random.sample(authors, k=min(6, len(authors)))
+            pool: list[dict] = []
+            for a in sample_authors:
+                pool.extend(get_recommendations_by_author(a))
+            # Filter out owned and blanks
+            filtered = []
+            for item in pool:
+                title = (item.get("title") or "").strip()
+                isbn = _normalize_isbn(item.get("isbn", ""))
+                if not title:
+                    continue
+                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
+                    continue
+                filtered.append(item)
+            random.shuffle(filtered)
+            picks = filtered[:4]
+
+            if not picks:
+                st.info("Couldn't find unseen picks right now. Try switching to 'By author' mode.")
+            for idx, item in enumerate(picks, 1):
+                title = (item.get("title") or "").strip()
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
+                    st.image(thumb, width=100)
+                with cols[1]:
+                    st.subheader(f"{idx}. {title or 'No Title'}")
+                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
+                    st.write(f"**Published:** {item.get('published', 'N/A')}")
+                    if item.get("description"):
+                        st.caption(item["description"]) 
+
+                    isbn = _normalize_isbn(item.get("isbn", ""))
+                    add_key = f"rec_surprise_add_{idx}"
+                    if st.button("🧾 Add to Wishlist", key=add_key):
+                        rec_meta = {
+                            "ISBN": isbn,
+                            "Title": title,
+                            "Author": item.get("authors", ""),
+                            "Genre": "",
+                            "Language": "",
+                            "Thumbnail": item.get("thumbnail", ""),
+                            "Description": (item.get("description") or ""),
+                            "Rating": "",
+                            "PublishedDate": item.get("published", ""),
+                        }
+                        try:
+                            append_record("Wishlist", rec_meta)
+                            st.success(f"Added '{title}' to Wishlist")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not add: {e}")
+                st.markdown("---")
+
+# ---- Diagnostics (safe to show) ----
+with st.expander("Diagnostics – help me if it still fails"):
+    try:
+        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
+        st.write("Service account email:", acct)
+        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
+        try:
+            test_client = connect_to_gsheets()
+            if test_client:
+                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
+                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
+        except Exception as e:
+            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
+    except Exception as e:
+        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
 
 # ==== Data Check (Library) =====================================================
 with st.expander("🔍 Data Check — Library", expanded=False):
@@ -1030,230 +997,143 @@ with st.expander("🔍 Data Check — Library", expanded=False):
         else:
             st.success("Looks good! No issues detected in Library 🎉")
 
-# --- Tabs ---
-tabs = st.tabs(["Library", "Wishlist", "Statistics", "Recommendations"])
 
-with tabs[0]:
-    st.header("My Library")
-    library_df = load_data("Library")
-    if not library_df.empty:
-        search_lib = st.text_input("🔎 Search My Library...", placeholder="Search titles, authors, or genres...", key="lib_search")
+# ==== Cross-check Authors & Titles (Library) ===================================
+import re, unicodedata
+from difflib import SequenceMatcher
 
-        lib_df_display = library_df.copy()
-        if search_lib:
-            lib_df_display = lib_df_display[
-                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
-            ]
+def _strip_diacritics(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
 
-        st.dataframe(
-            lib_df_display,
-            use_container_width=True,
-            column_config={
-                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
-                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
-            },
-            hide_index=True
-        )
-    else:
-        st.info("Your library is empty. Add a book to get started!")
+def _norm_title(s: str) -> str:
+    s = _strip_diacritics(str(s))
+    s = re.split(r"[:(\\[]", s, 1)[0]             # drop subtitle/series
+    s = re.sub(r"\\b(a|an|the)\\b\\s+", "", s, flags=re.I)  # drop leading articles
+    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
+    s = re.sub(r"\\s+", " ", s).strip()
+    return s
 
-with tabs[1]:
-    st.header("My Wishlist")
-    wishlist_df = load_data("Wishlist")
-    if not wishlist_df.empty:
-        search_wish = st.text_input("🔎 Search My Wishlist...", placeholder="Search titles, authors, or genres...", key="wish_search")
+def _norm_author(s: str) -> str:
+    s = keep_primary_author(str(s))               # your helper (keeps 1st author)
+    s = _strip_diacritics(s).replace("&", "and")
+    s = re.sub(r"[^a-z ]+", " ", s.lower())
+    s = re.sub(r"\\s+", " ", s).strip()
+    return s
 
-        wish_df_display = wishlist_df.copy()
-        if search_wish:
-            wish_df_display = wish_df_display[
-                wish_df_display.apply(lambda row: row.astype(str).str.contains(search_wish, case=False, na=False).any(), axis=1)
-            ]
-
-        st.dataframe(
-            wish_df_display,
-            use_container_width=True,
-            column_config={
-                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
-                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
-            },
-            hide_index=True
-        )
-    else:
-        st.info("Your wishlist is empty. Scan a book or add one manually!")
-
-with tabs[2]:
-    st.header("Statistics")
-    library_df = load_data("Library")
-    wishlist_df = load_data("Wishlist")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Books in Library", len(library_df))
-    with col2:
-        st.metric("Total Books on Wishlist", len(wishlist_df))
-    with col3:
-        uniq_auth = 0 if library_df.empty or "Author" not in library_df.columns else library_df["Author"].fillna("").astype(str).str.split(",").explode().str.strip().replace({"": None}).dropna().nunique()
-        st.metric("Unique Authors (Library)", int(uniq_auth))
-
-with tabs[3]:
-    st.header("Recommendations")
-    library_df = load_data("Library")
-    wishlist_df = load_data("Wishlist")
-
-    # Collect owned titles/ISBNs to filter out
-    owned_titles = set()
-    owned_isbns = set()
-    for df in (library_df, wishlist_df):
-        if not df.empty:
-            if "Title" in df.columns:
-                owned_titles.update(df["Title"].dropna().astype(str).str.lower().str.strip().tolist())
-            if "ISBN" in df.columns:
-                owned_isbns.update(df["ISBN"].dropna().astype(str).map(_normalize_isbn).tolist())
-
-    # Build author list from Library
-    authors = []
-    if not library_df.empty and "Author" in library_df.columns:
-        authors = (
-            library_df["Author"].dropna()
-            .astype(str)
-            .str.split(",")
-            .explode()
-            .str.strip()
-            .replace({"": None})
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        authors = sorted(set(authors), key=lambda s: s.lower())
-
-    mode = st.radio("Recommendation mode:", ["Surprise me (4 random unseen)", "By author"], horizontal=True)
-
-    if mode == "By author":
-        if authors:
-            selected_author = st.selectbox("Find books by authors you've read:", authors)
-        else:
-            selected_author = st.text_input("Type an author to get recommendations:")
-
-        if selected_author:
-            recommendations = get_recommendations_by_author(selected_author)
-
-            shown = 0
-            for item in recommendations:
-                title = (item.get("title") or "").strip()
-                isbn = _normalize_isbn(item.get("isbn", ""))
-                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
-                    continue
-
-                cols = st.columns([1, 4])
-                with cols[0]:
-                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
-                    st.image(thumb, width=100)
-                with cols[1]:
-                    st.subheader(title or "No Title")
-                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
-                    st.write(f"**Published:** {item.get('published', 'N/A')}")
-                    if item.get("description"):
-                        st.caption(item["description"])
-
-                    # Add to Wishlist button per recommendation
-                    add_key = f"rec_add_{selected_author}_{shown}"
-                    if st.button("🧾 Add to Wishlist", key=add_key):
-                        rec_meta = {
-                            "ISBN": isbn,
-                            "Title": title,
-                            "Author": item.get("authors", ""),
-                            "Genre": "",
-                            "Language": "",
-                            "Thumbnail": item.get("thumbnail", ""),
-                            "Description": (item.get("description") or ""),
-                            "Rating": "",
-                            "PublishedDate": item.get("published", ""),
-                        }
-                        try:
-                            append_record("Wishlist", rec_meta)
-                            st.success(f"Added '{title}' to Wishlist")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Could not add: {e}")
-                    st.markdown("---")
-                shown += 1
-                if shown >= 5:
-                    break
-
-            if shown == 0:
-                st.info("No new recommendations found (already owned or no results). Try another author.")
-
-    else:  # Surprise me (4 random unseen)
-        if not authors:
-            st.info("Add at least one book with an author to your Library to get surprise recommendations.")
-        else:
-            # Sample up to 6 authors to widen variety
-            sample_authors = random.sample(authors, k=min(6, len(authors)))
-            pool: list[dict] = []
-            for a in sample_authors:
-                pool.extend(get_recommendations_by_author(a))
-            # Filter out owned and blanks
-            filtered = []
-            for item in pool:
-                title = (item.get("title") or "").strip()
-                isbn = _normalize_isbn(item.get("isbn", ""))
-                if not title:
-                    continue
-                if (title.lower() in owned_titles) or (isbn and isbn in owned_isbns):
-                    continue
-                filtered.append(item)
-            random.shuffle(filtered)
-            picks = filtered[:4]
-
-            if not picks:
-                st.info("Couldn't find unseen picks right now. Try switching to 'By author' mode.")
-            for idx, item in enumerate(picks, 1):
-                title = (item.get("title") or "").strip()
-                cols = st.columns([1, 4])
-                with cols[0]:
-                    thumb, _ = _cover_or_placeholder(item.get("thumbnail", ""), title)
-                    st.image(thumb, width=100)
-                with cols[1]:
-                    st.subheader(f"{idx}. {title or 'No Title'}")
-                    st.write(f"**Author(s):** {item.get('authors', 'N/A')}")
-                    st.write(f"**Published:** {item.get('published', 'N/A')}")
-                    if item.get("description"):
-                        st.caption(item["description"])
-
-                    isbn = _normalize_isbn(item.get("isbn", ""))
-                    add_key = f"rec_surprise_add_{idx}"
-                    if st.button("🧾 Add to Wishlist", key=add_key):
-                        rec_meta = {
-                            "ISBN": isbn,
-                            "Title": title,
-                            "Author": item.get("authors", ""),
-                            "Genre": "",
-                            "Language": "",
-                            "Thumbnail": item.get("thumbnail", ""),
-                            "Description": (item.get("description") or ""),
-                            "Rating": "",
-                            "PublishedDate": item.get("published", ""),
-                        }
-                        try:
-                            append_record("Wishlist", rec_meta)
-                            st.success(f"Added '{title}' to Wishlist")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Could not add: {e}")
-                st.markdown("---")
-
-# ---- Diagnostics (safe to show) ----
-with st.expander("Diagnostics – help me if it still fails"):
+@st.cache_data(ttl=86400)
+def _search_google_by_ta(title: str, author: str) -> dict:
     try:
-        acct = st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)")
-        st.write("Service account email:", acct)
-        st.write("Spreadsheet ID in use:", SPREADSHEET_ID)
-        try:
-            test_client = connect_to_gsheets()
-            if test_client:
-                ss = test_client.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else test_client.open(GOOGLE_SHEET_NAME)
-                st.write("Found worksheet tabs:", [w.title for w in ss.worksheets()])
-        except Exception as e:
-            st.write("Open spreadsheet error:", f"{type(e).__name__}: {e}")
-    except Exception as e:
-        st.write("Diagnostics error:", f"{type(e).__name__}: {e}")
+        q = f'intitle:"{title}" inauthor:"{author}"'
+        params = {"q": q, "printType": "books", "maxResults": 1}
+        if GOOGLE_BOOKS_KEY: params["key"] = GOOGLE_BOOKS_KEY
+        r = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, timeout=12, headers=UA)
+        if r.ok and r.json().get("items"):
+            vi = r.json()["items"][0].get("volumeInfo", {})
+            au = (vi.get("authors") or [])
+            return {
+                "source": "google-search",
+                "Title": (vi.get("title") or "").strip(),
+                "Author": keep_primary_author(au[0].strip()) if au else ""
+            }
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(ttl=86400)
+def _search_ol_by_ta(title: str, author: str) -> dict:
+    try:
+        r = requests.get("https://openlibrary.org/search.json",
+                         params={"title": title, "author": author, "limit": 1}, timeout=12, headers=UA)
+        if r.ok:
+            docs = (r.json().get("docs") or [])
+            if docs:
+                au = (docs[0].get("author_name") or [])
+                return {
+                    "source": "ol-search",
+                    "Title": (docs[0].get("title") or "").strip(),
+                    "Author": keep_primary_author(au[0].strip()) if au else ""
+                }
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(ttl=86400)
+def _canonical_from_row(title: str, author: str, isbn: str) -> dict:
+    """Prefer ISBN lookups; fall back to title+author search."""
+    isbn = _normalize_isbn(isbn)
+    if isbn:
+        g = get_book_details_google(isbn)
+        if g.get("Title"):
+            return {"source": "google-isbn", "Title": g["Title"], "Author": g["Author"]}
+        o = get_book_details_openlibrary(isbn)
+        if o.get("Title"):
+            return {"source": "ol-isbn", "Title": o["Title"], "Author": o["Author"]}
+    # No ISBN or no hit → search by Title+Author
+    s = _search_google_by_ta(title, author) or _search_ol_by_ta(title, author)
+    return s or {}
+
+with st.expander("🔎 Cross-check — Authors & Titles (Library)", expanded=False):
+    lib = load_data("Library")
+    if lib.empty:
+        st.info("Library sheet is empty.")
+    else:
+        # Ensure columns exist
+        for c in ["ISBN", "Title", "Author"]:
+            if c not in lib.columns:
+                lib[c] = ""
+
+        rows = []
+        issues = []
+        for i, r in lib.iterrows():
+            sheet_title  = str(r["Title"]).strip()
+            sheet_author = str(r["Author"]).strip()
+            sheet_isbn   = str(r["ISBN"]).strip()
+
+            if not sheet_title and not sheet_author:
+                continue
+
+            can = _canonical_from_row(sheet_title, sheet_author, sheet_isbn)
+            if not can:
+                rows.append({
+                    "Row": i+2, "ISBN": sheet_isbn,
+                    "Sheet Title": sheet_title, "Sheet Author": sheet_author,
+                    "Canonical Title": "(not found)", "Canonical Author": "(not found)",
+                    "Title Match": "n/a", "Author Match": "n/a", "Source": "n/a", "Note": "No external match"
+                })
+                continue
+
+            nt_s = _norm_title(sheet_title);  nt_c = _norm_title(can["Title"])
+            na_s = _norm_author(sheet_author); na_c = _norm_author(can["Author"])
+
+            t_ratio = SequenceMatcher(None, nt_s, nt_c).ratio() if nt_c else 0.0
+            a_ratio = SequenceMatcher(None, na_s, na_c).ratio() if na_c else 0.0
+
+            t_match = "exact" if nt_s == nt_c else ("close" if t_ratio >= 0.85 else "diff")
+            a_match = "exact" if na_s == na_c else ("close" if a_ratio >= 0.85 else "diff")
+
+            note = ""
+            if t_match == "diff":
+                note += "Title differs. "
+            if a_match == "diff":
+                note += "Author differs. "
+            if not note and (t_match == "close" or a_match == "close"):
+                note = "Minor variance (edition/subtitle/diacritics)."
+
+            row_info = {
+                "Row": i+2, "ISBN": sheet_isbn,
+                "Sheet Title": sheet_title, "Canonical Title": can["Title"], "Title Match": t_match,
+                "Sheet Author": sheet_author, "Canonical Author": can["Author"], "Author Match": a_match,
+                "Source": can.get("source",""), "Note": note.strip()
+            }
+            rows.append(row_info)
+            if t_match != "exact" or a_match != "exact":
+                issues.append(row_info)
+
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        if issues:
+            st.warning(f"{len(issues)} row(s) need attention. Look at 'diff' rows and update the sheet if needed.")
+        else:
+            st.success("All titles & authors match the external sources 🎯")
+
+
+
