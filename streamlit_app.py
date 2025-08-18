@@ -702,6 +702,65 @@ with tabs[0]:
                 )
             ]
 
+        # --- 3 thumbnails per row everywhere (mobile-safe via CSS Grid) ---
+        st.metric("Books shown", len(lib_df_display))
+
+        if lib_df_display.empty:
+            st.info("No matches.")
+        else:
+            items = []
+            for _, row in lib_df_display.iterrows():
+                img_url, _ = _cover_or_placeholder(
+                    str(row.get("Thumbnail", "")),
+                    str(row.get("Title", "")),
+                )
+                title  = (row.get("Title")  or "Untitled").strip()
+                author = (row.get("Author") or "").strip()
+                cap = f"{title} — {author}" if author else title
+
+                items.append(f"""
+                <figure class="cover-card">
+                  <img src="{img_url}" alt="{cap}" loading="lazy">
+                  <figcaption>{cap}</figcaption>
+                </figure>
+                """)
+
+            html = f"""
+            <style>
+              .cover-grid {{
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 0.75rem;
+                width: 100%;
+              }}
+              .cover-card {{
+                margin: 0;
+              }}
+              .cover-card img {{
+                width: 100%;
+                height: auto;
+                display: block;
+                border-radius: 0.5rem;
+              }}
+              .cover-card figcaption {{
+                font-size: 0.8rem;
+                line-height: 1.2;
+                margin-top: 0.25rem;
+                text-align: center;
+                word-break: break-word;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+              }}
+            </style>
+            <div class="cover-grid">
+              {''.join(items)}
+            </div>
+            """
+            st.markdown(html, unsafe_allow_html=True)
+
+
 # --- Fixed 3 thumbnails per row (mobile-safe with CSS Grid) ---
 st.metric("Books shown", len(lib_df_display))
 
