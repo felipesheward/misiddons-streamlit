@@ -456,32 +456,11 @@ def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
         return url, title or ""
     txt = quote((title or "No Cover").upper())
     # Center text in placeholder by adding some line breaks
-    placeholder = f"https://via.placeholder.com/300x450/FFFFFF/000000?text={txt}"
+    placeholder = f"https://via.placeholder.com/300x450?text={txt}"
     return placeholder, (title or "No Cover")
 
 # ---------- Sheet writer ----------
-def update_cover_url_by_index(tab: str, df_index: int, new_url: str) -> bool:
-    """Updates the 'Thumbnail' column for a specific row index."""
-    try:
-        ws = _get_ws(tab)
-        if not ws:
-            st.error("Could not connect to worksheet.")
-            return False
 
-        headers = ws.row_values(1)
-        try:
-            thumb_col_idx = headers.index("Thumbnail") + 1
-        except ValueError:
-            st.error("Your sheet is missing the 'Thumbnail' column.")
-            return False
-
-        sheet_row = df_index + 2
-        ws.update_cell(sheet_row, thumb_col_idx, new_url)
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Failed to update cover URL: {e}")
-        return False
 
 def append_record(tab: str, record: dict) -> None:
     """Ensure headers, dedupe (ISBN or Title+Author), preserve ISBN as text, then append."""
@@ -531,7 +510,7 @@ def append_record(tab: str, record: dict) -> None:
 
         keymap = {h.lower(): h for h in headers}
         row = [record.get(keymap.get(h.lower(), h), record.get(h, "")) for h in headers]
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        ws.append_row(row, value_input_option="RAW")
         st.cache_data.clear()
 
     except Exception as e:
@@ -706,48 +685,16 @@ with tabs[0]:
             lib_df_display = lib_df_display[
                 lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
             ]
-        
-        # Ensure required columns exist for display
-        for col in ["Thumbnail", "Title", "Author"]:
-            if col not in lib_df_display.columns:
-                lib_df_display[col] = ""
 
-        # Display books in a 3-column grid
-        num_books = len(lib_df_display)
-        cols_per_row = 3
-        for i in range(0, num_books, cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j in range(cols_per_row):
-                book_index = i + j
-                if book_index < num_books:
-                    book = lib_df_display.iloc[book_index]
-                    with cols[j]:
-                        title = book.get("Title", "No Title")
-                        author = book.get("Author", "No Author")
-                        cover_url = book.get("Thumbnail", "")
-                        
-                        placeholder_url, display_title = _cover_or_placeholder(cover_url, title)
-                        st.image(placeholder_url, use_column_width=True)
-                        st.markdown(f"**{title}**")
-                        st.caption(author)
-
-                        # If cover is missing, provide an option to update it
-                        if not cover_url:
-                            st.markdown("---")
-                            original_row_index = book.name  # This is the original index from the loaded DataFrame
-                            
-                            with st.form(key=f"update_form_{original_row_index}"):
-                                st.caption("Add a cover for this book")
-                                new_url = st.text_input("Image URL", key=f"url_{original_row_index}", label_visibility="collapsed", placeholder="Paste image URL here")
-                                if st.form_submit_button("Save Cover"):
-                                    if new_url and new_url.startswith("http"):
-                                        success = update_cover_url_by_index("Library", original_row_index, new_url)
-                                        if success:
-                                            st.success("Cover updated!")
-                                            st.rerun()
-                                    else:
-                                        st.warning("Please enter a valid URL (starting with http).")
-
+        st.dataframe(
+            lib_df_display,
+            use_container_width=True,
+            column_config={
+                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
+                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
+            },
+            hide_index=True
+        )
     else:
         st.info("Your library is empty. Add a book to get started!")
 
@@ -1187,3 +1134,6 @@ with st.expander("🔎 Cross-check — Authors & Titles (Library)", expanded=Fal
             st.warning(f"{len(issues)} row(s) need attention. Look at 'diff' rows and update the sheet if needed.")
         else:
             st.success("All titles & authors match the external sources 🎯")
+
+
+
