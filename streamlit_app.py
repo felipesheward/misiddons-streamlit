@@ -702,26 +702,68 @@ with tabs[0]:
                 )
             ]
 
-        # --- Fixed 3 columns per row ---
-        n_cols = 3
-        st.metric("Books shown", len(lib_df_display))
+# --- Fixed 3 thumbnails per row (mobile-safe with CSS Grid) ---
+st.metric("Books shown", len(lib_df_display))
 
-        if lib_df_display.empty:
-            st.info("No matches.")
-        else:
-            cols = st.columns(n_cols)
-            i = 0
-            for _, row in lib_df_display.iterrows():
-                with cols[i % n_cols]:
-                    img_url, cap = _cover_or_placeholder(
-                        str(row.get("Thumbnail", "")),
-                        str(row.get("Title", "")),
-                    )
-                    st.image(img_url, use_container_width=True)
-                    title = (row.get("Title") or "Untitled").strip()
-                    author = (row.get("Author") or "").strip()
-                    st.caption(f"**{title}** — {author}" if author else f"**{title}**")
-                i += 1
+if lib_df_display.empty:
+    st.info("No matches.")
+else:
+    items = []
+    for _, row in lib_df_display.iterrows():
+        img_url, _ = _cover_or_placeholder(
+            str(row.get("Thumbnail", "")),
+            str(row.get("Title", "")),
+        )
+        title  = (row.get("Title")  or "Untitled").strip()
+        author = (row.get("Author") or "").strip()
+        cap = f"{title} — {author}" if author else title
+
+        items.append(f"""
+        <figure class="cover-card">
+          <img src="{img_url}" alt="{cap}" loading="lazy">
+          <figcaption>{cap}</figcaption>
+        </figure>
+        """)
+
+    html = f"""
+    <style>
+      /* Force 3 columns even on small screens */
+      .cover-grid {{
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.75rem;
+        width: 100%;
+      }}
+      .cover-card {{
+        margin: 0;
+      }}
+      .cover-card img {{
+        width: 100%;
+        height: auto;           /* keep book cover aspect ratio */
+        display: block;
+        border-radius: 0.5rem;
+      }}
+      .cover-card figcaption {{
+        font-size: 0.8rem;
+        line-height: 1.2;
+        margin-top: 0.25rem;
+        text-align: center;
+        word-break: break-word;
+      }}
+      /* Optional: trim super-long captions to 2 lines */
+      .cover-card figcaption {{
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }}
+    </style>
+    <div class="cover-grid">
+      {''.join(items)}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 
 
         top_cols = st.columns([1, 1, 2])
