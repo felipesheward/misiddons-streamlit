@@ -681,12 +681,10 @@ with tabs[0]:
     if library_df.empty:
         st.info("Your library is empty. Add a book to get started!")
     else:
-        # Ensure expected columns exist
         for c in ["Title", "Author", "Thumbnail", "Genre", "ISBN"]:
             if c not in library_df.columns:
                 library_df[c] = ""
 
-        # Search box
         search_lib = st.text_input(
             "🔎 Search My Library...",
             placeholder="Search titles, authors, or genres...",
@@ -701,6 +699,33 @@ with tabs[0]:
                     axis=1,
                 )
             ]
+
+        top_cols = st.columns([1, 1, 2])
+        with top_cols[0]:
+            n_cols = st.slider("Columns", min_value=3, max_value=10, value=6, help="Covers per row.")
+        with top_cols[1]:
+            st.metric("Books shown", len(lib_df_display))
+
+        if lib_df_display.empty:
+            st.info("No matches.")
+        else:
+            cols = st.columns(n_cols)
+            i = 0
+            for _, row in lib_df_display.iterrows():
+                with cols[i % n_cols]:
+                    img_url, cap = _cover_or_placeholder(
+                        str(row.get("Thumbnail", "")),
+                        str(row.get("Title", "")),
+                    )
+                    st.image(img_url, use_container_width=True)  # ← updated here
+                    title = (row.get("Title") or "Untitled").strip()
+                    author = (row.get("Author") or "").strip()
+                    if author:
+                        st.caption(f"**{title}** — {author}")
+                    else:
+                        st.caption(f"**{title}**")
+                i += 1
+
 
         # Controls for the gallery
         top_cols = st.columns([1, 1, 2])
