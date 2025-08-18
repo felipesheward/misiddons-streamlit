@@ -676,27 +676,62 @@ tabs = st.tabs(["Library", "Wishlist", "Statistics", "Recommendations"])
 
 with tabs[0]:
     st.header("My Library")
+
     library_df = load_data("Library")
-    if not library_df.empty:
-        search_lib = st.text_input("🔎 Search My Library...", placeholder="Search titles, authors, or genres...", key="lib_search")
+    if library_df.empty:
+        st.info("Your library is empty. Add a book to get started!")
+    else:
+        # Ensure expected columns exist
+        for c in ["Title", "Author", "Thumbnail", "Genre", "ISBN"]:
+            if c not in library_df.columns:
+                library_df[c] = ""
+
+        # Search box
+        search_lib = st.text_input(
+            "🔎 Search My Library...",
+            placeholder="Search titles, authors, or genres...",
+            key="lib_search",
+        )
 
         lib_df_display = library_df.copy()
         if search_lib:
             lib_df_display = lib_df_display[
-                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
+                lib_df_display.apply(
+                    lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(),
+                    axis=1,
+                )
             ]
 
-        st.dataframe(
-            lib_df_display,
-            use_container_width=True,
-            column_config={
-                "Thumbnail": st.column_config.ImageColumn("Cover", width="small"),
-                "Description": st.column_config.TextColumn("Description", help="Summary of the book", width="large")
-            },
-            hide_index=True
-        )
-    else:
-        st.info("Your library is empty. Add a book to get started!")
+        # Controls for the gallery
+        top_cols = st.columns([1, 1, 2])
+        with top_cols[0]:
+            n_cols = st.slider("Columns", min_value=3, max_value=10, value=6, help="Covers per row.")
+        with top_cols[1]:
+            st.metric("Books shown", len(lib_df_display))
+
+        # Thumbnail grid
+        if lib_df_display.empty:
+            st.info("No matches.")
+        else:
+            cols = st.columns(n_cols)
+            i = 0
+            for _, row in lib_df_display.iterrows():
+                with cols[i % n_cols]:
+                    img_url, cap = _cover_or_placeholder(
+                        str(row.get("Thumbnail", "")),
+                        str(row.get("Title", "")),
+                    )
+                    # Full-bleed cover
+                    st.image(img_url, use_column_width=True)
+                    # Minimal caption under the cover
+                    title = (row.get("Title") or "Untitled").strip()
+                    author = (row.get("Author") or "").strip()
+                    if author:
+                        st.caption(f"**{title}** — {author}")
+                    else:
+                        st.caption(f"**{title}**")
+                i += 1
+
 
 with tabs[1]:
     st.header("My Wishlist")
