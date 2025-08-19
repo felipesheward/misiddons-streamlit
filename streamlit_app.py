@@ -41,6 +41,42 @@ DEFAULT_SHEET_ID = "1AXupO4-kABwoz88H2dYfc6hv6wzooh7f8cDnIRl0Q7s"
 SPREADSHEET_ID = st.secrets.get("google_sheet_id", DEFAULT_SHEET_ID)
 GOOGLE_SHEET_NAME = st.secrets.get("google_sheet_name", "database")  # only used if no ID
 GOOGLE_BOOKS_KEY = st.secrets.get("google_books_api_key", None)
+st.set_page_config(page_title="Misiddons Book Database", layout="wide")
+
+# --- Library grid styles ---
+st.markdown("""
+<style>
+:root{
+  --card-bg:#ffffff; --card-radius:16px; --shadow:0 6px 24px rgba(0,0,0,.08);
+}
+.library-grid{
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+  gap:18px; align-items:start;
+}
+@media (max-width: 520px){
+  .library-grid{ grid-template-columns:repeat(3,1fr); }
+}
+.book-card{
+  background:var(--card-bg); border-radius:var(--card-radius);
+  box-shadow:var(--shadow); overflow:hidden;
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.book-card:hover{ transform:translateY(-2px); box-shadow:0 10px 28px rgba(0,0,0,.12); }
+.book-cover{
+  aspect-ratio:2/3; width:100%; object-fit:cover; display:block; background:#f3f3f3;
+}
+.book-body{ padding:10px 12px; }
+.book-title{
+  font-weight:700; font-size:.95rem; line-height:1.15; margin:0 0 4px;
+  min-height:2.3em; /* keep titles aligned */
+}
+.book-author{
+  color:#666; font-size:.82rem; margin:0 0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.badges{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.badge{ font-size:.70rem; padding:3px 6px; border-radius:999px; background:#eef2ff; }
+</style>
+""", unsafe_allow_html=True)
 
 st.set_page_config(page_title="Misiddons Book Database", layout="wide")
 
