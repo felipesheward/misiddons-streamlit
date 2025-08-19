@@ -479,6 +479,44 @@ def get_recommendations_by_author(author: str) -> list[dict]:
 
     return results
 
+from html import escape as _html_escape
+
+def render_library_grid(df: pd.DataFrame):
+    # Make sure columns exist
+    for col in ["Thumbnail", "Title", "Author", "Language", "Rating"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    cards = []
+    for _, r in df.iterrows():
+        title  = _html_escape(str(r.get("Title","") or "Untitled"))
+        author = _html_escape(str(r.get("Author","") or "Unknown"))
+        lang   = normalize_language(r.get("Language","")) or ""
+        rating = str(r.get("Rating","")).strip()
+
+        # Use your existing helper for placeholder logic
+        cover_url, _ = _cover_or_placeholder(r.get("Thumbnail",""), title)
+
+        badges = []
+        if lang:   badges.append(f'<span class="badge">{_html_escape(lang)}</span>')
+        if rating: badges.append(f'<span class="badge">{_html_escape(rating)}</span>')
+        badges_html = "".join(badges)
+
+        cards.append(f"""
+        <div class="book-card">
+          <img class="book-cover" src="{cover_url}" alt="{title}">
+          <div class="book-body">
+            <p class="book-title">{title}</p>
+            <p class="book-author">{author}</p>
+            <div class="badges">{badges_html}</div>
+          </div>
+        </div>
+        """)
+
+    grid_html = f'<div class="library-grid">{"".join(cards)}</div>'
+    st.markdown(grid_html, unsafe_allow_html=True)
+
+
 # ---------- UI helpers ----------
 
 def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
@@ -726,56 +764,50 @@ tabs = st.tabs(["Library", "Wishlist", "Statistics", "Recommendations"])
 with tabs[0]:
     st.header("My Library")
     library_df = load_data("Library")
-    if not library_df.empty:
-        search_lib = st.text_input("🔎 Search My Library...", placeholder="Search titles, authors, or genres...", key="lib_search")
+
+    if library_df.empty:
+        st.info("Your library is empty. Add a book to get started!")
+    else:
+        # Search
+        search_lib = st.text_input(
+            "🔎 Search My Library...",
+            placeholder="Search titles, authors, or genres...",
+            key="lib_search"
+        )
 
         lib_df_display = library_df.copy()
         if search_lib:
             lib_df_display = lib_df_display[
-                lib_df_display.apply(lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(), axis=1)
+                lib_df_display.apply(
+                    lambda row: row.astype(str).str.contains(search_lib, case=False, na=False).any(),
+                    axis=1
+                )
             ]
-        
-        for col in ["Thumbnail", "Title", "Author"]:
-            if col not in lib_df_display.columns:
-                lib_df_display[col] = ""
 
-        # Display books in a 3-column grid
-        num_books = len(lib_df_display)
-        cols_per_row = 3
-        for i in range(0, num_books, cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j in range(cols_per_row):
-                book_index = i + j
-                if book_index < num_books:
-                    book = lib_df_display.iloc[book_index]
-                    with cols[j]:
-                        title = book.get("Title", "No Title")
-                        author = book.get("Author", "No Author")
-                        cover_url = book.get("Thumbnail", "")
-                        
-                        placeholder_url, display_title = _cover_or_placeholder(cover_url, title)
-                        # UPDATED: use_container_width (replaces deprecated use_column_width)
-                        st.image(placeholder_url, use_container_width=True)
-                        st.markdown(f"**{title}**")
-                        st.caption(author)
+        # Render pretty card grid
+        render_library_grid(lib_df_display)
 
-                        if not cover_url:
-                            st.markdown("---")
-                            original_row_index = book.name
-                            with st.form(key=f"update_form_{original_row_index}"):
-                                st.caption("Add a cover for this book")
-                                new_url = st.text_input("Image URL", key=f"url_{original_row_index}", label_visibility="collapsed", placeholder="Paste image URL here")
-                                if st.form_submit_button("Save Cover"):
-                                    if new_url and new_url.startswith("http"):
-                                        success = update_cover_url_by_index("Library", original_row_index, new_url)
-                                        if success:
-                                            st.success("Cover updated!")
-                                            st.rerun()
-                                    else:
-                                        st.warning("Please enter a valid URL (starting with http).")
-
-    else:
-        st.info("Your library is empty. Add a book to get started!")
+        # (Optional) Fix missing covers in a focused panel
+        missing = lib_df_display[lib_df_display.get("Thumbnail","").astype(str).str.strip() == ""]
+        if not missing.empty:
+            with st.expander("🖼️ Add missing covers", expanded=False):
+                st.caption("Paste a valid https:// image URL for any book without a cover.")
+                for idx, row in missing.iterrows():
+                    cols = st.columns([3,2])
+                    with cols[0]:
+                        st.markdown(f"**{row.get('Title','Untitled')}**")
+                        st.caption(row.get("Author","Unknown"))
+                    with cols[1]:
+                        with st.form(key=f"fix_cover_{idx}"):
+                            url = st.text_input("Image URL", key=f"url_{idx}", label_visibility="collapsed",
+                                                placeholder="https://…")
+                            if st.form_submit_button("Save"):
+                                if url.startswith("http"):
+                                    if update_cover_url_by_index("Library", int(idx), url):
+                                        st.success("Saved. Refreshing…")
+                                        st.rerun()
+                                else:
+                                    st.warning("Please enter a valid URL (starting with http).")
 
 with tabs[1]:
     st.header("My Wishlist")
