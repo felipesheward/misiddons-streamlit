@@ -511,6 +511,7 @@ def append_record(tab: str, record: dict) -> None:
         raise
 
 # ---------- NEW: Reusable Grid Display Function ----------
+# ---------- NEW: Reusable Grid Display Function (Mobile Optimized) ----------
 def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
     """Renders a DataFrame of books as a responsive, styled grid of covers."""
     if df.empty:
@@ -527,8 +528,8 @@ def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
         <style>
             .book-grid {{
                 display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-                gap: 1rem;
+                grid-template-columns: repeat(3, 1fr); /* Always 3 columns */
+                gap: 0.75rem; /* Tighter gap for mobile */
             }}
             .book-container {{
                 position: relative;
@@ -539,15 +540,15 @@ def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
             }}
             .book-cover {{
                 width: 100%;
-                border-radius: 10px;
-                box-shadow: 3px 3px 10px rgba(0,0,0,0.2);
+                border-radius: 8px; /* Slightly smaller radius */
+                box-shadow: 2px 2px 8px rgba(0,0,0,0.2);
             }}
             .read-check {{
                 position: absolute;
-                bottom: 10px;
-                right: 10px;
-                width: 32px;
-                height: 32px;
+                bottom: 8px;
+                right: 8px;
+                width: 28px;
+                height: 28px;
                 background-color: rgba(45, 186, 75, 0.9);
                 border-radius: 50%;
                 background-image: url("{checkmark_svg}");
@@ -555,18 +556,21 @@ def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
                 background-repeat: no-repeat;
                 background-position: center;
                 border: 2px solid white;
-                box-shadow: 0 0 10px rgba(0,0,0,0.5);
+                box-shadow: 0 0 8px rgba(0,0,0,0.5);
             }}
             .book-title {{
-                font-size: 0.9rem;
-                font-weight: bold;
-                margin-top: 0.5rem;
-                line-height: 1.2;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                display: -webkit-box;
-                -webkit-line-clamp: 2;
-                -webkit-box-orient: vertical;
+                display: none; /* Hide title to match the target UI */
+            }}
+            
+            /* Media query for larger screens (desktops) */
+            @media (min-width: 768px) {{
+                .book-grid {{
+                    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                    gap: 1rem;
+                }}
+                .book-cover {{
+                    border-radius: 10px;
+                }}
             }}
         </style>
     """, unsafe_allow_html=True)
@@ -582,7 +586,7 @@ def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
     for _, book in df.iterrows():
         cover_url, _ = _cover_or_placeholder(book["Thumbnail"], book["Title"])
         is_read = show_read_status and book["Date Read"].strip() != ""
-
+        
         # Build the HTML for one book
         html = f'<div class="book-container">'
         html += f'<img src="{cover_url}" class="book-cover" alt="{book["Title"]}">'
@@ -590,9 +594,9 @@ def display_books_grid(df: pd.DataFrame, show_read_status: bool = False):
             html += '<div class="read-check"></div>'
         html += f'<div class="book-title">{book["Title"]}</div>'
         html += f'</div>'
-
+        
         st.markdown(html, unsafe_allow_html=True)
-
+        
     st.write('</div>', unsafe_allow_html=True)
 
 
