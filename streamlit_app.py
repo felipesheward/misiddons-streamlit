@@ -477,26 +477,34 @@ def _cover_or_placeholder(url: str, title: str = "") -> tuple[str, str]:
     placeholder = f"https://via.placeholder.com/300x450/FFFFFF/000000?text={txt}"
     return placeholder, (title or "No Cover")
 
+from html import escape as _html_escape
+
 def render_library_grid(df: pd.DataFrame):
-    """HTML/CSS card grid renderer for Library."""
+    """
+    Render Library as an HTML/CSS card grid that matches the user's sample:
+    - Only a rating badge (e.g., "OL:3.89 | GR:unavailable")
+    - No language badge
+    - Same DOM structure and class names
+    """
     # Ensure columns exist
-    for col in ["Thumbnail", "Title", "Author", "Language", "Rating"]:
+    for col in ["Thumbnail", "Title", "Author", "Rating"]:
         if col not in df.columns:
             df[col] = ""
 
     cards = []
     for _, r in df.iterrows():
-        title  = _html_escape(str(r.get("Title","") or "Untitled"))
-        author = _html_escape(str(r.get("Author","") or "Unknown"))
-        lang   = normalize_language(r.get("Language","")) or ""
-        rating = str(r.get("Rating","")).strip()
+        title  = _html_escape(str(r.get("Title", "") or "Untitled"))
+        author = _html_escape(str(r.get("Author", "") or "Unknown"))
+        rating = (str(r.get("Rating", "") or "").strip())
 
-        cover_url, _ = _cover_or_placeholder(r.get("Thumbnail",""), title)
+        # Your existing helper keeps placeholders for missing covers
+        cover_url, _ = _cover_or_placeholder(r.get("Thumbnail", ""), title)
 
-        badges = []
-        if lang:   badges.append(f'<span class="badge">{_html_escape(lang)}</span>')
-        if rating: badges.append(f'<span class="badge">{_html_escape(rating)}</span>')
-        badges_html = "".join(badges)
+        # Rating-only badge (no language). If empty, render an empty badges div.
+        if rating:
+            badge_html = f'<span class="badge">{_html_escape(rating)}</span>'
+        else:
+            badge_html = ""
 
         cards.append(f"""
         <div class="book-card">
@@ -504,13 +512,14 @@ def render_library_grid(df: pd.DataFrame):
           <div class="book-body">
             <p class="book-title">{title}</p>
             <p class="book-author">{author}</p>
-            <div class="badges">{badges_html}</div>
+            <div class="badges">{badge_html}</div>
           </div>
         </div>
         """)
 
     grid_html = f'<div class="library-grid">{"".join(cards)}</div>'
     st.markdown(grid_html, unsafe_allow_html=True)
+
 # ---------- Sheet writer ----------
 def update_cover_url_by_index(tab: str, df_index: int, new_url: str) -> bool:
     """Updates the 'Thumbnail' column for a specific row index."""
